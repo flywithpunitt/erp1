@@ -31,7 +31,7 @@ const ExcelFileSchema = new Schema<IExcelFile>(
       type: [Schema.Types.Mixed],
       required: true,
       default: [],
-    },
+    } as any,
   },
   {
     timestamps: true,

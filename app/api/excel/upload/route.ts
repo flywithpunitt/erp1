@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
     }
 
     const headers = (jsonData[0] as any[]).map((h) => String(h || "").trim()).filter((h) => h);
-    const rows = jsonData.slice(1).map((row: any[]) => {
+    const rows = (jsonData.slice(1) as any[][]).map((row: any[]) => {
       const rowObj: Record<string, any> = {};
       headers.forEach((header, index) => {
         rowObj[header] = row[index] !== undefined ? String(row[index]) : "";

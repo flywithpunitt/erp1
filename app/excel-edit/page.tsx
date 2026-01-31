@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { API_BASE_URL } from "@/lib/config";
@@ -13,7 +13,7 @@ interface ExcelFile {
   rows: Record<string, any>[];
 }
 
-export default function ExcelEditPage() {
+function ExcelEditContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user } = useCurrentUser();
@@ -332,5 +332,22 @@ export default function ExcelEditPage() {
         </div>
       </main>
     </div>
+  );
+}
+
+export default function ExcelEditPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-slate-950 text-slate-50 flex items-center justify-center">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-400 mx-auto mb-4"></div>
+            <p className="text-slate-400">Loading...</p>
+          </div>
+        </div>
+      }
+    >
+      <ExcelEditContent />
+    </Suspense>
   );
 }
