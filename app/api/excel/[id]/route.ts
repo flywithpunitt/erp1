@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import mongoose from "mongoose";
 import connectDB from "@/lib/db";
 import ExcelFile from "@/lib/models/ExcelFile";
-import { getAuthUser, requireAdminOrManager } from "@/lib/auth";
+import { getAuthUser, requireAdminOrManager, requireManager } from "@/lib/auth";
 
 export async function GET(
   request: NextRequest,
