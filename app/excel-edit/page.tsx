@@ -54,6 +54,14 @@ function ExcelEditContent() {
   const [formulaValue, setFormulaValue] = useState("");
 
   const hotTableRef = useRef<HotTable | null>(null);
+  
+  // Helper to get Handsontable instance from ref
+  const getHotInstance = (): Handsontable | undefined => {
+    const ref = hotTableRef.current;
+    if (!ref) return undefined;
+    // Access hotInstance with type assertion since TypeScript doesn't recognize it
+    return (ref as any).hotInstance as Handsontable | undefined;
+  };
 
   useEffect(() => {
     if (!fileId) {
@@ -217,6 +225,62 @@ function ExcelEditContent() {
     scheduleAutoSave();
   };
 
+  const handleDeleteColumn = (colIndex?: number) => {
+    if (!editedData || editedData.headers.length <= 1) return;
+
+    const targetCol =
+      typeof colIndex === "number"
+        ? colIndex
+        : selectedCell
+        ? selectedCell.col
+        : null;
+
+    if (targetCol === null || targetCol < 0 || targetCol >= editedData.headers.length) {
+      return;
+    }
+
+    const headerToDelete = editedData.headers[targetCol];
+    const newHeaders = editedData.headers.filter((_, i) => i !== targetCol);
+    const newRows = editedData.rows.map((row) => {
+      const newRow = { ...row };
+      delete newRow[headerToDelete];
+      return newRow;
+    });
+
+    setEditedData({ headers: newHeaders, rows: newRows });
+    scheduleAutoSave();
+  };
+
+  const handleClearCell = () => {
+    const hotInstance = getHotInstance();
+    if (!hotInstance || !selectedCell) return;
+
+    const selectedRange = hotInstance.getSelectedLast();
+    if (!selectedRange) return;
+
+    const [startRow, startCol, endRow, endCol] = selectedRange;
+
+    for (let row = startRow; row <= endRow; row += 1) {
+      for (let col = startCol; col <= endCol; col += 1) {
+        hotInstance.setDataAtCell(row, col, "");
+      }
+    }
+
+    hotInstance.render();
+  };
+
+  const handleUndo = () => {
+    const hotInstance = getHotInstance();
+    if (!hotInstance) return;
+    hotInstance.undo();
+  };
+
+  const handleRedo = () => {
+    const hotInstance = getHotInstance();
+    if (!hotInstance) return;
+    hotInstance.redo();
+  };
+
   const handleAddColumn = (afterColIndex?: number) => {
     if (!editedData) return;
 
@@ -249,9 +313,7 @@ function ExcelEditContent() {
     toggleClass?: string;
     alignClass?: "htLeft" | "htCenter" | "htRight";
   }) => {
-    const hotInstance: Handsontable | undefined =
-      hotTableRef.current?.hotInstance;
-
+    const hotInstance = getHotInstance();
     if (!hotInstance) return;
 
     const selectedRange = hotInstance.getSelectedLast();
@@ -290,9 +352,7 @@ function ExcelEditContent() {
   };
 
   const handleMergeCells = () => {
-    const hotInstance: Handsontable | undefined =
-      hotTableRef.current?.hotInstance;
-
+    const hotInstance = getHotInstance();
     if (!hotInstance) return;
 
     const mergeCellsPlugin = hotInstance.getPlugin("mergeCells");
@@ -326,8 +386,7 @@ function ExcelEditContent() {
 
     setSelectedCell({ row, col: column });
 
-    const hotInstance: Handsontable | undefined =
-      hotTableRef.current?.hotInstance;
+    const hotInstance = getHotInstance();
     const value = hotInstance?.getDataAtCell(row, column) ?? "";
     setFormulaValue(value ?? "");
   };
@@ -335,9 +394,7 @@ function ExcelEditContent() {
   const handleFormulaCommit = () => {
     if (!selectedCell) return;
 
-    const hotInstance: Handsontable | undefined =
-      hotTableRef.current?.hotInstance;
-
+    const hotInstance = getHotInstance();
     if (!hotInstance) return;
 
     const { row, col } = selectedCell;
@@ -518,7 +575,42 @@ function ExcelEditContent() {
               >
                 Delete Row
               </button>
+              <button
+                type="button"
+                onClick={() => handleDeleteColumn()}
+                className="px-2.5 py-1.5 text-red-100 hover:bg-red-900/70 border-l border-emerald-700"
+              >
+                Delete Col
+              </button>
             </div>
+
+            <div className="inline-flex rounded-md border border-slate-700 bg-slate-900/60 shadow-sm">
+              <button
+                type="button"
+                onClick={handleUndo}
+                className="px-2.5 py-1.5 text-slate-100 hover:bg-slate-800"
+                title="Undo (Ctrl+Z)"
+              >
+                ↶ Undo
+              </button>
+              <button
+                type="button"
+                onClick={handleRedo}
+                className="px-2.5 py-1.5 text-slate-100 hover:bg-slate-800 border-l border-slate-700"
+                title="Redo (Ctrl+Y)"
+              >
+                ↷ Redo
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleClearCell}
+              className="rounded-md border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-slate-100 hover:bg-slate-800 shadow-sm"
+              title="Clear selected cells"
+            >
+              Clear
+            </button>
           </div>
         </div>
       </header>
@@ -561,6 +653,7 @@ function ExcelEditContent() {
               manualRowResize
               contextMenu
               copyPaste
+              undo
               licenseKey="non-commercial-and-evaluation"
               afterChange={handleHotChange}
               afterSelectionEnd={handleAfterSelectionEnd}
