@@ -53,7 +53,7 @@ function ExcelEditContent() {
   const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null);
   const [formulaValue, setFormulaValue] = useState("");
 
-  const hotTableRef = useRef<HotTable | null>(null);
+  const hotTableRef = useRef<any>(null);
   
   // Helper to get Handsontable instance from ref
   const getHotInstance = (): Handsontable | undefined => {
@@ -324,9 +324,13 @@ function ExcelEditContent() {
     for (let row = startRow; row <= endRow; row += 1) {
       for (let col = startCol; col <= endCol; col += 1) {
         const meta = hotInstance.getCellMeta(row, col);
-        const classNames = new Set(
-          (meta.className || "").split(" ").filter(Boolean)
-        );
+        const classNameValue = meta.className;
+        const classNameArray = Array.isArray(classNameValue)
+          ? classNameValue
+          : typeof classNameValue === "string"
+          ? classNameValue.split(" ").filter(Boolean)
+          : [];
+        const classNames = new Set(classNameArray);
 
         if (options.toggleClass) {
           if (classNames.has(options.toggleClass)) {
@@ -361,12 +365,9 @@ function ExcelEditContent() {
     if (!range) return;
 
     const { from, to } = range;
-    mergeCellsPlugin.merge({
-      row: from.row,
-      col: from.col,
-      rowspan: to.row - from.row + 1,
-      colspan: to.col - from.col + 1,
-    });
+    const rowspan = to.row - from.row + 1;
+    const colspan = to.col - from.col + 1;
+    mergeCellsPlugin.merge(from.row, from.col, rowspan, colspan);
 
     hotInstance.render();
   };
