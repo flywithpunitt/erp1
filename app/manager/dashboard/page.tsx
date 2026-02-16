@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import SignOutButton from "@/components/SignOutButton";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { API_BASE_URL } from "@/lib/config";
+import { Pencil, Download, Copy, Trash2 } from "lucide-react";
 
 interface ExcelFile {
   id: string;
@@ -273,37 +274,42 @@ export default function ManagerDashboardPage() {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            onClick={() => router.push(`/excel-edit?id=${file.id}`)}
-                            className="text-cyan-400 hover:text-cyan-300 transition"
-                            title="Edit"
-                          >
-                            ✏️
-                          </button>
-                          <button
-                            onClick={() => handleDownload(file.id, file.name)}
-                            className="text-indigo-400 hover:text-indigo-300 transition"
-                            title="Download"
-                          >
-                            ⬇️
-                          </button>
-                          <button
-                            onClick={() => handleDuplicate(file.id)}
-                            className="text-slate-400 hover:text-slate-300 transition"
-                            title="Duplicate"
-                          >
-                            📄
-                          </button>
-                          <button
-                            onClick={() => handleDelete(file.id, file.name)}
-                            className="text-red-400 hover:text-red-300 transition"
-                            title="Delete"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      </td>
+  <div className="flex items-center justify-end gap-3">
+    
+    <button
+      onClick={() => router.push(`/excel-edit?id=${file.id}`)}
+      className="text-cyan-400 hover:text-cyan-300 transition"
+      title="Edit"
+    >
+      <Pencil size={18} />
+    </button>
+
+    <button
+      onClick={() => handleDownload(file.id, file.name)}
+      className="text-indigo-400 hover:text-indigo-300 transition"
+      title="Download"
+    >
+      <Download size={18} />
+    </button>
+
+    <button
+      onClick={() => handleDuplicate(file.id)}
+      className="text-slate-400 hover:text-slate-300 transition"
+      title="Duplicate"
+    >
+      <Copy size={18} />
+    </button>
+
+    <button
+      onClick={() => handleDelete(file.id, file.name)}
+      className="text-red-400 hover:text-red-300 transition"
+      title="Delete"
+    >
+      <Trash2 size={18} />
+    </button>
+
+  </div>
+</td>
                     </tr>
                   ))}
                 </tbody>
