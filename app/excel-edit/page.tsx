@@ -673,7 +673,7 @@ function ExcelEditContent() {
               afterSelectionEnd={handleAfterSelectionEnd}
               viewportRowRenderingOffset={50}
               viewportColumnRenderingOffset={20}
-              columnWidth={100}
+              colWidths={() => 100}
             />
           </div>
         </div>
