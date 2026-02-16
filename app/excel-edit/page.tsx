@@ -236,7 +236,7 @@ function ExcelEditContent() {
     // Convert to CSV
     const csvContent = data
       .map((row) =>
-        row.map((cell) => {
+        row.map((cell: any) => {
           const cellStr = String(cell ?? "");
           // Escape quotes and wrap in quotes if contains comma, quote, or newline
           if (cellStr.includes(",") || cellStr.includes('"') || cellStr.includes("\n")) {
