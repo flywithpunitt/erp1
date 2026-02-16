@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { API_BASE_URL } from "@/lib/config";
@@ -49,11 +49,11 @@ function ExcelEditContent() {
     headers: string[];
     rows: Record<string, any>[];
   } | null>(null);
-  const [saveTimeout, setSaveTimeout] = useState<NodeJS.Timeout | null>(null);
   const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null);
   const [formulaValue, setFormulaValue] = useState("");
 
   const hotTableRef = useRef<any>(null);
+  const lastSelectionRef = useRef<{ row: number; col: number } | null>(null);
   
   // Helper to get Handsontable instance from ref
   const getHotInstance = (): Handsontable | undefined => {
@@ -89,329 +89,336 @@ function ExcelEditContent() {
       }
 
       const data = await response.json();
-      setFile(data.file);
+
+      if (!data.file) {
+        throw new Error("File data not found in response");
+      }
+
+      const fileData = data.file as ExcelFile;
+
+      // Rows can be empty, but must be an array
+      const rowsRaw = Array.isArray(fileData.rows) ? fileData.rows : [];
+
+      // Prefer stored headers; if missing/empty but rows exist, derive a stable header set
+      let headers: string[] = Array.isArray(fileData.headers)
+        ? fileData.headers.map((h) => String(h ?? "").trim()).filter(Boolean)
+        : [];
+
+      if (headers.length === 0 && rowsRaw.length > 0) {
+        const firstRow: any = rowsRaw[0];
+        if (Array.isArray(firstRow)) {
+          headers = Array.from({ length: firstRow.length }, (_v, i) => `Column ${i + 1}`);
+        } else if (firstRow && typeof firstRow === "object") {
+          headers = Object.keys(firstRow);
+        }
+      }
+
+      // If still no headers, create a single column so the grid isn't 0-width
+      if (headers.length === 0) {
+        headers = ["Column 1"];
+      }
+
+      setFile(fileData);
       setEditedData({
-        headers: [...data.file.headers],
-        rows: JSON.parse(JSON.stringify(data.file.rows)),
+        headers,
+        rows: JSON.parse(JSON.stringify(rowsRaw)),
       });
+
+      setError(""); // Clear any previous errors
     } catch (err) {
+      console.error("Error fetching file:", err);
       setError(err instanceof Error ? err.message : "Failed to load file");
+      setFile(null);
+      setEditedData(null);
     } finally {
       setLoading(false);
     }
   };
 
+  // ✅ STEP 2 — Load data IMPERATIVELY
+  useEffect(() => {
+    if (!editedData) return;
+    if (!hotTableRef.current) return;
+  
+    const hot = hotTableRef.current.hotInstance;
+  
+    // Build true Excel-like 2D grid
+    const grid: any[][] = [];
+  
+    // Header row
+    grid.push(editedData.headers);
+  
+    // Data rows
+    editedData.rows.forEach((row) => {
+      if (Array.isArray(row)) {
+        grid.push(row);
+      } else {
+        grid.push(
+          editedData.headers.map((h) => row?.[h] ?? "")
+        );
+      }
+    });
+  
+    hot.loadData(grid);   // 🔥 THIS IS THE FIX
+    hot.render();
+  }, [editedData]);
+
+  // ✅ STEP 5 — Save MUST read from Handsontable (not state)
   const saveFile = async (showMessage = false) => {
-    if (!file || !editedData) return;
+    if (!file) return;
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const data = hot.getData();
+    if (!data || data.length === 0) return;
+
+    const headers = data[0];
+    const rows = data.slice(1).map((row) => {
+      const obj: Record<string, any> = {};
+      headers.forEach((h: string, i: number) => {
+        obj[h] = row[i];
+      });
+      return obj;
+    });
 
     try {
       setSaving(true);
-      setError("");
-      if (showMessage) setSuccess("");
-
-      const response = await fetch(`${API_BASE_URL}/api/excel/${file.id}`, {
+      await fetch(`${API_BASE_URL}/api/excel/${file.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({
-          name: file.name,
-          headers: editedData.headers,
-          rows: editedData.rows,
-        }),
+        body: JSON.stringify({ name: file.name, headers, rows }),
       });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.message || "Failed to save");
-      }
 
       if (showMessage) {
         setSuccess("File saved successfully!");
         setTimeout(() => setSuccess(""), 3000);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save file");
+      setError("Failed to save file");
     } finally {
       setSaving(false);
     }
   };
 
-  const scheduleAutoSave = () => {
-    if (saveTimeout) {
-      clearTimeout(saveTimeout);
-    }
-
-    const timeout = setTimeout(() => {
-      saveFile(false);
-    }, 2000);
-
-    setSaveTimeout(timeout);
-  };
-
-  const handleCellChange = (rowIndex: number, header: string, value: string) => {
-    if (!editedData) return;
-
-    const newRows = [...editedData.rows];
-    if (!newRows[rowIndex]) {
-      newRows[rowIndex] = {};
-    }
-    newRows[rowIndex] = { ...newRows[rowIndex], [header]: value };
-
-    setEditedData({ ...editedData, rows: newRows });
-    scheduleAutoSave();
-  };
-
-  const handleHotChange = (changes: any[] | null, source: string) => {
-    if (!changes || source === "loadData" || !editedData) return;
-
-    changes.forEach(([rowIndex, prop, _oldValue, newValue]) => {
-      const colIndex =
-        typeof prop === "number"
-          ? (prop as number)
-          : editedData.headers.indexOf(prop as string);
-      if (colIndex < 0) return;
-      const header = editedData.headers[colIndex];
-      handleCellChange(rowIndex, header, newValue ?? "");
-
-      if (
-        selectedCell &&
-        selectedCell.row === rowIndex &&
-        selectedCell.col === colIndex
-      ) {
-        setFormulaValue(newValue ?? "");
+  const handleAfterSelectionEnd = useCallback(
+    (row: number, col: number, row2: number, col2: number) => {
+      // Store selection
+      lastSelectionRef.current = { row, col };
+      setSelectedCell({ row, col });
+      
+      // Update formula bar
+      const hot = getHotInstance();
+      if (hot) {
+        const cellValue = hot.getDataAtCell(row, col);
+        setFormulaValue(cellValue ?? "");
       }
-    });
-  };
+    },
+    []
+  );
 
-  const handleAddRow = (afterRowIndex?: number) => {
-    if (!editedData) return;
+  const handleFormulaCommit = useCallback(() => {
+    const hot = getHotInstance();
+    if (!hot || !selectedCell) return;
 
-    const insertIndex =
-      typeof afterRowIndex === "number"
-        ? afterRowIndex + 1
-        : editedData.rows.length;
-
-    const newRow: Record<string, any> = {};
-    editedData.headers.forEach((header) => {
-      newRow[header] = "";
-    });
-
-    const newRows = [...editedData.rows];
-    newRows.splice(insertIndex, 0, newRow);
-
-    setEditedData({
-      ...editedData,
-      rows: newRows,
-    });
-    scheduleAutoSave();
-  };
-
-  const handleDeleteRow = (rowIndex?: number) => {
-    if (!editedData) return;
-
-    const targetRow =
-      typeof rowIndex === "number"
-        ? rowIndex
-        : selectedCell
-        ? selectedCell.row
-        : null;
-
-    if (targetRow === null || targetRow < 0 || targetRow >= editedData.rows.length) {
-      return;
-    }
-
-    const newRows = editedData.rows.filter((_, i) => i !== targetRow);
-    setEditedData({ ...editedData, rows: newRows });
-    scheduleAutoSave();
-  };
-
-  const handleDeleteColumn = (colIndex?: number) => {
-    if (!editedData || editedData.headers.length <= 1) return;
-
-    const targetCol =
-      typeof colIndex === "number"
-        ? colIndex
-        : selectedCell
-        ? selectedCell.col
-        : null;
-
-    if (targetCol === null || targetCol < 0 || targetCol >= editedData.headers.length) {
-      return;
-    }
-
-    const headerToDelete = editedData.headers[targetCol];
-    const newHeaders = editedData.headers.filter((_, i) => i !== targetCol);
-    const newRows = editedData.rows.map((row) => {
-      const newRow = { ...row };
-      delete newRow[headerToDelete];
-      return newRow;
-    });
-
-    setEditedData({ headers: newHeaders, rows: newRows });
-    scheduleAutoSave();
-  };
-
-  const handleClearCell = () => {
-    const hotInstance = getHotInstance();
-    if (!hotInstance || !selectedCell) return;
-
-    const selectedRange = hotInstance.getSelectedLast();
-    if (!selectedRange) return;
-
-    const [startRow, startCol, endRow, endCol] = selectedRange;
-
-    for (let row = startRow; row <= endRow; row += 1) {
-      for (let col = startCol; col <= endCol; col += 1) {
-        hotInstance.setDataAtCell(row, col, "");
-      }
-    }
-
-    hotInstance.render();
-  };
-
-  const handleUndo = () => {
-    const hotInstance = getHotInstance();
-    if (!hotInstance) return;
-    hotInstance.undo();
-  };
-
-  const handleRedo = () => {
-    const hotInstance = getHotInstance();
-    if (!hotInstance) return;
-    hotInstance.redo();
-  };
-
-  const handleAddColumn = (afterColIndex?: number) => {
-    if (!editedData) return;
-
-    const insertIndex =
-      typeof afterColIndex === "number"
-        ? afterColIndex + 1
-        : editedData.headers.length;
-
-    const newHeader = `Column ${editedData.headers.length + 1}`;
-    const newHeaders = [...editedData.headers];
-    newHeaders.splice(insertIndex, 0, newHeader);
-
-    const newRows = editedData.rows.map((row) => {
-      const nextRow: Record<string, any> = {};
-      newHeaders.forEach((header) => {
-        if (header === newHeader) {
-          nextRow[header] = "";
-        } else {
-          nextRow[header] = row[header] ?? "";
-        }
-      });
-      return nextRow;
-    });
-
-    setEditedData({ headers: newHeaders, rows: newRows });
-    scheduleAutoSave();
-  };
-
-  const applyClassToSelection = (options: {
-    toggleClass?: string;
-    alignClass?: "htLeft" | "htCenter" | "htRight";
-  }) => {
-    const hotInstance = getHotInstance();
-    if (!hotInstance) return;
-
-    const selectedRange = hotInstance.getSelectedLast();
-    if (!selectedRange) return;
-
-    const [startRow, startCol, endRow, endCol] = selectedRange;
-
-    for (let row = startRow; row <= endRow; row += 1) {
-      for (let col = startCol; col <= endCol; col += 1) {
-        const meta = hotInstance.getCellMeta(row, col);
-        const classNameValue = meta.className;
-        const classNameArray = Array.isArray(classNameValue)
-          ? classNameValue
-          : typeof classNameValue === "string"
-          ? classNameValue.split(" ").filter(Boolean)
-          : [];
-        const classNames = new Set(classNameArray);
-
-        if (options.toggleClass) {
-          if (classNames.has(options.toggleClass)) {
-            classNames.delete(options.toggleClass);
-          } else {
-            classNames.add(options.toggleClass);
-          }
-        }
-
-        if (options.alignClass) {
-          ["htLeft", "htCenter", "htRight", "htJustify"].forEach((cls) =>
-            classNames.delete(cls)
-          );
-          classNames.add(options.alignClass);
-        }
-
-        const nextClassName = Array.from(classNames).join(" ");
-        hotInstance.setCellMeta(row, col, "className", nextClassName || undefined);
-      }
-    }
-
-    hotInstance.render();
-  };
-
-  const handleMergeCells = () => {
-    const hotInstance = getHotInstance();
-    if (!hotInstance) return;
-
-    const mergeCellsPlugin = hotInstance.getPlugin("mergeCells");
-    const range = hotInstance.getSelectedRangeLast();
-
-    if (!range) return;
-
-    const { from, to } = range;
-    const rowspan = to.row - from.row + 1;
-    const colspan = to.col - from.col + 1;
-    mergeCellsPlugin.merge(from.row, from.col, rowspan, colspan);
-
-    hotInstance.render();
-  };
+    hot.setDataAtCell(selectedCell.row, selectedCell.col, formulaValue);
+  }, [selectedCell, formulaValue]);
 
   const handleDownload = () => {
     if (!file) return;
-    window.location.href = `${API_BASE_URL}/api/excel/${file.id}/download`;
+    
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const data = hot.getData();
+    if (!data || data.length === 0) return;
+
+    // Convert to CSV
+    const csvContent = data
+      .map((row) =>
+        row.map((cell) => {
+          const cellStr = String(cell ?? "");
+          // Escape quotes and wrap in quotes if contains comma, quote, or newline
+          if (cellStr.includes(",") || cellStr.includes('"') || cellStr.includes("\n")) {
+            return `"${cellStr.replace(/"/g, '""')}"`;
+          }
+          return cellStr;
+        })
+        .join(",")
+      )
+      .join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${file.name || "export"}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
-  const handleAfterSelectionEnd = (
-    row: number,
-    column: number,
-    _row2: number,
-    _column2: number
-  ) => {
-    if (row < 0 || column < 0) return;
+  const applyClassToSelection = useCallback(
+    ({
+      toggleClass,
+      alignClass,
+    }: {
+      toggleClass?: string;
+      alignClass?: string;
+    }) => {
+      const hot = getHotInstance();
+      if (!hot) return;
 
-    setSelectedCell({ row, col: column });
+      const selected = hot.getSelected();
+      if (!selected || selected.length === 0) return;
 
-    const hotInstance = getHotInstance();
-    const value = hotInstance?.getDataAtCell(row, column) ?? "";
-    setFormulaValue(value ?? "");
-  };
+      selected.forEach(([row1, col1, row2, col2]) => {
+        const startRow = Math.min(row1, row2);
+        const endRow = Math.max(row1, row2);
+        const startCol = Math.min(col1, col2);
+        const endCol = Math.max(col1, col2);
 
-  const handleFormulaCommit = () => {
-    if (!selectedCell) return;
+        for (let r = startRow; r <= endRow; r++) {
+          for (let c = startCol; c <= endCol; c++) {
+            const meta = hot.getCellMeta(r, c);
+            const currentClasses = meta.className ? meta.className.split(" ") : [];
 
-    const hotInstance = getHotInstance();
-    if (!hotInstance) return;
+            if (toggleClass) {
+              const idx = currentClasses.indexOf(toggleClass);
+              if (idx >= 0) {
+                currentClasses.splice(idx, 1);
+              } else {
+                currentClasses.push(toggleClass);
+              }
+            }
 
-    const { row, col } = selectedCell;
-    hotInstance.setDataAtCell(row, col, formulaValue);
-    hotInstance.render();
-  };
+            if (alignClass) {
+              const alignClasses = ["htLeft", "htCenter", "htRight"];
+              const filtered = currentClasses.filter(
+                (cls) => !alignClasses.includes(cls)
+              );
+              filtered.push(alignClass);
+              hot.setCellMeta(r, c, "className", filtered.join(" "));
+            } else {
+              hot.setCellMeta(r, c, "className", currentClasses.join(" "));
+            }
+          }
+        }
+      });
 
-  const tableData =
-    editedData?.rows.map((row) =>
-      editedData.headers.map((header) => row[header] ?? "")
-    ) ?? [];
+      hot.render();
+    },
+    []
+  );
+
+  const handleMergeCells = useCallback(() => {
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const selected = hot.getSelected();
+    if (!selected || selected.length === 0) return;
+
+    const [row1, col1, row2, col2] = selected[0];
+    const startRow = Math.min(row1, row2);
+    const endRow = Math.max(row1, row2);
+    const startCol = Math.min(col1, col2);
+    const endCol = Math.max(col1, col2);
+
+    const plugin = hot.getPlugin("mergeCells");
+    if (plugin) {
+      plugin.merge(startRow, startCol, endRow, endCol);
+      hot.render();
+    }
+  }, []);
+
+  const handleAddRow = useCallback((atRow?: number) => {
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const targetRow = atRow ?? hot.countRows();
+    hot.alter("insert_row_below", targetRow, 1);
+  }, []);
+
+  const handleAddColumn = useCallback((atCol?: number) => {
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const targetCol = atCol ?? hot.countCols();
+    hot.alter("insert_col_end", targetCol, 1);
+  }, []);
+
+  const handleDeleteRow = useCallback(() => {
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const selected = hot.getSelected();
+    if (!selected || selected.length === 0) return;
+
+    const [row1, , row2] = selected[0];
+    const startRow = Math.min(row1, row2);
+    const amount = Math.abs(row2 - row1) + 1;
+
+    hot.alter("remove_row", startRow, amount);
+  }, []);
+
+  const handleDeleteColumn = useCallback(() => {
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const selected = hot.getSelected();
+    if (!selected || selected.length === 0) return;
+
+    const [, col1, , col2] = selected[0];
+    const startCol = Math.min(col1, col2);
+    const amount = Math.abs(col2 - col1) + 1;
+
+    hot.alter("remove_col", startCol, amount);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    const hot = getHotInstance();
+    if (!hot) return;
+    const undoPlugin = hot.getPlugin("undoRedo");
+    if (undoPlugin) {
+      undoPlugin.undo();
+    }
+  }, []);
+
+  const handleRedo = useCallback(() => {
+    const hot = getHotInstance();
+    if (!hot) return;
+    const undoPlugin = hot.getPlugin("undoRedo");
+    if (undoPlugin) {
+      undoPlugin.redo();
+    }
+  }, []);
+
+  const handleClearCell = useCallback(() => {
+    const hot = getHotInstance();
+    if (!hot) return;
+
+    const selected = hot.getSelected();
+    if (!selected || selected.length === 0) return;
+
+    selected.forEach(([row1, col1, row2, col2]) => {
+      const startRow = Math.min(row1, row2);
+      const endRow = Math.max(row1, row2);
+      const startCol = Math.min(col1, col2);
+      const endCol = Math.max(col1, col2);
+
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          hot.setDataAtCell(r, c, "");
+        }
+      }
+    });
+  }, []);
 
   const selectedCellLabel =
-    selectedCell != null
+    selectedCell !== null
       ? `${getColumnLetter(selectedCell.col)}${selectedCell.row + 1}`
-      : "";
+      : null;
 
   if (loading) {
     return (
@@ -433,9 +440,9 @@ function ExcelEditContent() {
             href={
               user?.role === "ADMIN" ? "/admin/dashboard" : "/manager/dashboard"
             }
-            className="text-cyan-400 hover:text-cyan-300 transition"
+            className="text-cyan-400 hover:text-cyan-300"
           >
-            Back to Dashboard
+            ← Back to Dashboard
           </Link>
         </div>
       </div>
@@ -443,10 +450,10 @@ function ExcelEditContent() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-50">
-      <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/95 backdrop-blur px-4 sm:px-8 py-4">
-        <div className="max-w-7xl mx-auto space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+    <div className="min-h-screen bg-slate-950">
+      <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-8 py-4 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <Link
                 href={
@@ -640,24 +647,27 @@ function ExcelEditContent() {
           <div className="border-b border-slate-800 bg-slate-900/80 px-3 py-2 text-xs text-slate-300">
             Sheet1
           </div>
-          <div className="overflow-auto max-h-[70vh]">
+          <div
+            className="overflow-auto max-h-[70vh] w-full"
+            style={{ position: "relative", width: "100%" }}
+          >
             <HotTable
               ref={hotTableRef}
-              className="ht-excel-like"
-              data={tableData}
-              colHeaders={(index) => getColumnLetter(index)}
-              rowHeaders
+              rowHeaders={true}
+              colHeaders={true}
               stretchH="all"
-              height="auto"
               width="100%"
+              height={600}
               manualColumnResize
               manualRowResize
               contextMenu
               copyPaste
               undo
               licenseKey="non-commercial-and-evaluation"
-              afterChange={handleHotChange}
               afterSelectionEnd={handleAfterSelectionEnd}
+              viewportRowRenderingOffset={50}
+              viewportColumnRenderingOffset={20}
+              columnWidth={100}
             />
           </div>
         </div>

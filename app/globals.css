@@ -31,11 +31,31 @@ body {
   border-collapse: separate;
 }
 
+/* Column headers - ensure they are visible */
+.ht-excel-like .htCore thead th {
+  background: linear-gradient(#107c41, #0b5a30) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  border-color: #0b5a30 !important;
+  padding: 8px 12px !important;
+  text-align: center !important;
+  position: relative !important;
+  z-index: 1 !important;
+}
+
 .ht-excel-like .htCore th {
-  background: linear-gradient(#107c41, #0b5a30);
-  color: #ffffff;
-  font-weight: 600;
-  border-color: #0b5a30;
+  background: linear-gradient(#107c41, #0b5a30) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  border-color: #0b5a30 !important;
+}
+
+/* Ensure column header clone is visible */
+.ht-excel-like .ht_clone_top th,
+.ht-excel-like .ht_clone_top_left_corner th {
+  background: linear-gradient(#107c41, #0b5a30) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
 }
 
 .ht-excel-like .htCore td {
@@ -53,4 +73,30 @@ body {
 
 .ht-excel-like .current {
   border: 2px solid #107c41 !important;
+}
+
+/* Ensure headers are not hidden by overflow */
+.ht-excel-like .handsontable {
+  overflow: visible !important;
+  width: 100% !important;
+}
+
+.ht-excel-like .handsontable .ht_clone_top {
+  display: block !important;
+  visibility: visible !important;
+}
+
+/* Ensure grid fills full width */
+.ht-excel-like .handsontable .ht_master {
+  width: 100% !important;
+}
+
+.ht-excel-like .handsontable .wtHolder {
+  width: 100% !important;
+}
+
+/* Ensure columns stretch to fill available space */
+.ht-excel-like .htCore {
+  width: 100% !important;
+  table-layout: auto !important;
 }
