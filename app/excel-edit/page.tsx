@@ -282,7 +282,13 @@ function ExcelEditContent() {
         for (let r = startRow; r <= endRow; r++) {
           for (let c = startCol; c <= endCol; c++) {
             const meta = hot.getCellMeta(r, c);
-            const currentClasses = meta.className ? meta.className.split(" ") : [];
+            const currentClasses =
+              typeof meta.className === "string"
+              ? meta.className.split(" ")
+              : Array.isArray(meta.className)
+              ? [...meta.className]
+              : [];
+
 
             if (toggleClass) {
               const idx = currentClasses.indexOf(toggleClass);
