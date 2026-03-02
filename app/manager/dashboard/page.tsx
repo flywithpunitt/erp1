@@ -276,13 +276,13 @@ export default function ManagerDashboardPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
   <div className="flex items-center justify-end gap-3">
     
-    <button
-      onClick={() => router.push(`/excel-edit?id=${file.id}`)}
-      className="text-cyan-400 hover:text-cyan-300 transition"
-      title="Edit"
+    <Link
+      href={`/excel-edit?id=${file.id}`}
+      className="inline-flex text-cyan-400 hover:text-cyan-300 transition"
+      title="Edit sheet"
     >
       <Pencil size={18} />
-    </button>
+    </Link>
 
     <button
       onClick={() => handleDownload(file.id, file.name)}
