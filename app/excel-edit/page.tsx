@@ -306,16 +306,18 @@ function ExcelEditContent() {
       data: [sheet],
     };
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        try {
-          win.luckysheet.create(opts);
-          setSheetInitialized(true);
-        } catch (err) {
-          console.error("Luckysheet create error:", err);
-          luckysheetInitializedRef.current = false;
+      try {
+        if (!win.luckysheet) {
+          console.error("Luckysheet not loaded yet")
+          return
         }
-      });
-    });
+    
+        win.luckysheet.create(opts)
+        setSheetInitialized(true)
+      } catch (err) {
+        console.error("Luckysheet create error:", err)
+      }
+    })
   }, [scriptReady, file?.name]);
 
   useEffect(() => {
