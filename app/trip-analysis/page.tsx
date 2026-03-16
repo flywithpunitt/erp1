@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { API_BASE_URL } from "@/lib/config";
@@ -81,7 +81,7 @@ function parseDate(value: unknown): Date | undefined {
   return undefined;
 }
 
-export default function TripAnalysisPage() {
+function TripAnalysisPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { user } = useCurrentUser();
@@ -872,6 +872,14 @@ export default function TripAnalysisPage() {
         </section>
       </main>
     </div>
+  );
+}
+
+export default function TripAnalysisPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <TripAnalysisPageContent />
+    </Suspense>
   );
 }
 
