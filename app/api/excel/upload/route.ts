@@ -25,11 +25,18 @@ export async function POST(request: NextRequest) {
     const buffer = Buffer.from(bytes);
 
     // Read Excel file directly from buffer (works in serverless environments)
-    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const workbook = XLSX.read(buffer, {
+      type: "buffer",
+      cellDates: true,
+    });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
 
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      raw: true,
+    });
 
     if (jsonData.length === 0) {
       return NextResponse.json({ message: "Excel file is empty" }, { status: 400 });
@@ -39,7 +46,35 @@ export async function POST(request: NextRequest) {
     const rows = (jsonData.slice(1) as any[][]).map((row: any[]) => {
       const rowObj: Record<string, any> = {};
       headers.forEach((header, index) => {
-        rowObj[header] = row[index] !== undefined ? String(row[index]) : "";
+        const cellValue = row[index];
+
+        if (cellValue instanceof Date) {
+          const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+          const d = cellValue;
+          const day = pad(d.getDate());
+          const month = pad(d.getMonth() + 1);
+          const year = d.getFullYear();
+          const hours = pad(d.getHours());
+          const minutes = pad(d.getMinutes());
+
+          rowObj[header] = `${day}-${month}-${year} ${hours}:${minutes}`;
+        } else if (typeof cellValue === "number") {
+          // Likely an Excel serial date, convert using XLSX utils
+          const date = XLSX.SSF.parse_date_code(cellValue);
+          if (date) {
+            const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+            const day = pad(date.d);
+            const month = pad(date.m);
+            const year = date.y;
+            const hours = pad(date.H);
+            const minutes = pad(date.M);
+            rowObj[header] = `${day}-${month}-${year} ${hours}:${minutes}`;
+          } else {
+            rowObj[header] = String(cellValue);
+          }
+        } else {
+          rowObj[header] = cellValue !== undefined ? String(cellValue) : "";
+        }
       });
       return rowObj;
     });
