@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import mongoose from "mongoose";
 import connectDB from "@/lib/db";
 import ExcelFile from "@/lib/models/ExcelFile";
@@ -22,22 +23,18 @@ export async function POST(request: NextRequest) {
     }
 
     const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
+    const buffer = Buffer.from(new Uint8Array(bytes));
 
-    // Read Excel file directly from buffer (works in serverless environments)
-    const workbook = XLSX.read(buffer, {
-      type: "buffer",
-      cellDates: true,
-    });
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
+    const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+    const fmtDate = (d: Date) =>
+      `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
-      header: 1,
-      defval: "",
-      raw: true,
-    });
+    // ── 1. Read values via SheetJS (fast, handles date serials) ───────────────
+    const xlsxWb = XLSX.read(buffer, { type: "buffer", cellDates: true });
+    const sheetName = xlsxWb.SheetNames[0];
+    const xlsxWs = xlsxWb.Sheets[sheetName];
 
+    const jsonData = XLSX.utils.sheet_to_json(xlsxWs, { header: 1, defval: "", raw: true });
     if (jsonData.length === 0) {
       return NextResponse.json({ message: "Excel file is empty" }, { status: 400 });
     }
@@ -46,47 +43,93 @@ export async function POST(request: NextRequest) {
     const rows = (jsonData.slice(1) as any[][]).map((row: any[]) => {
       const rowObj: Record<string, any> = {};
       headers.forEach((header, index) => {
-        const cellValue = row[index];
-
-        if (cellValue instanceof Date) {
-          const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-          const d = cellValue;
-          const day = pad(d.getDate());
-          const month = pad(d.getMonth() + 1);
-          const year = d.getFullYear();
-          const hours = pad(d.getHours());
-          const minutes = pad(d.getMinutes());
-
-          rowObj[header] = `${day}-${month}-${year} ${hours}:${minutes}`;
-        } else if (typeof cellValue === "number") {
-          // Likely an Excel serial date, convert using XLSX utils
-          const date = XLSX.SSF.parse_date_code(cellValue);
-          if (date) {
-            const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-            const day = pad(date.d);
-            const month = pad(date.m);
-            const year = date.y;
-            const hours = pad(date.H);
-            const minutes = pad(date.M);
-            rowObj[header] = `${day}-${month}-${year} ${hours}:${minutes}`;
-          } else {
-            rowObj[header] = String(cellValue);
-          }
+        const cv = row[index];
+        if (cv instanceof Date) {
+          rowObj[header] = fmtDate(cv);
+        } else if (typeof cv === "number") {
+          const date = XLSX.SSF.parse_date_code(cv);
+          rowObj[header] = date
+            ? `${pad(date.d)}-${pad(date.m)}-${date.y} ${pad(date.H)}:${pad(date.M)}`
+            : String(cv);
         } else {
-          rowObj[header] = cellValue !== undefined ? String(cellValue) : "";
+          rowObj[header] = cv !== undefined ? String(cv) : "";
         }
       });
       return rowObj;
     });
 
+    // ── 2. Read styles via ExcelJS (full fill/font colour support) ────────────
+    const ejsWb = new ExcelJS.Workbook();
+    await ejsWb.xlsx.load(bytes);
+    const ejsWs = ejsWb.worksheets[0];
+
+    // Helper: ExcelJS ARGB "FFD9D9D9" → Luckysheet "#d9d9d9"
+    const argbToHex = (argb: string | undefined): string | null => {
+      if (!argb || argb.length < 6) return null;
+      const rgb = argb.length === 8 ? argb.slice(2) : argb; // strip alpha byte
+      return "#" + rgb.toLowerCase();
+    };
+
+    const celldata: any[] = [];
+
+    ejsWs?.eachRow({ includeEmpty: false }, (row, rowIdx) => {
+      (row as any).eachCell({ includeEmpty: false }, (cell: ExcelJS.Cell, colIdx: number) => {
+        const r = rowIdx - 1; // 0-based
+        const c = colIdx - 1;
+        const lv: Record<string, any> = {};
+
+        // Value
+        const raw = cell.value;
+        if (raw instanceof Date) {
+          lv.v = fmtDate(raw); lv.m = lv.v;
+        } else if (raw !== null && raw !== undefined && raw !== "") {
+          lv.v = String(raw); lv.m = String(raw);
+        } else {
+          lv.v = null; lv.m = "";
+        }
+
+        // Background fill colour
+        const fill = cell.fill as any;
+        if (fill?.type === "pattern" && fill?.fgColor) {
+          const bg = argbToHex(fill.fgColor.argb ?? fill.fgColor.rgb);
+          if (bg && bg !== "#ffffff" && bg !== "#00000000" && bg !== "#000000") lv.bg = bg;
+        }
+
+        // Font
+        const font = cell.font as any;
+        if (font) {
+          const fc = argbToHex(font.color?.argb ?? font.color?.rgb);
+          if (fc && fc !== "#000000" && fc !== "#ff000000") lv.fc = fc;
+          if (font.bold)      lv.bl = 1;
+          if (font.italic)    lv.it = 1;
+          if (font.underline) lv.un = 1;
+          if (font.size)      lv.fs = font.size;
+        }
+
+        const hasStyle = lv.bg || lv.fc || lv.bl || lv.it || lv.un || lv.fs;
+        const hasValue = lv.v !== null && lv.v !== "";
+        if (hasValue || hasStyle) celldata.push({ r, c, v: lv });
+      });
+    });
+
     await connectDB();
 
-    const excelFile = await ExcelFile.create({
+    const now = new Date();
+    const insertResult = await ExcelFile.collection.insertOne({
       ownerId: new mongoose.Types.ObjectId(user.id),
       name: file.name.replace(/\.(xlsx|xls)$/i, ""),
       headers,
       rows,
+      ...(celldata.length > 0 ? { celldata } : {}),
+      createdAt: now,
+      updatedAt: now,
     });
+
+    const excelFile = {
+      _id: insertResult.insertedId,
+      name: file.name.replace(/\.(xlsx|xls)$/i, ""),
+      headers, rows, createdAt: now, updatedAt: now,
+    };
 
     return NextResponse.json({
       message: "File uploaded successfully",

@@ -1,13 +1,10 @@
 "use client";
 
-export const dynamic = "force-dynamic";
-
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { API_BASE_URL } from "@/lib/config";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import VehicleTripSheetModal from "@/components/VehicleTripSheetModal";
 
 interface ExcelFile {
   id: string;
@@ -39,29 +36,11 @@ interface CustomerSummary {
   count: number;
 }
 
-interface TripDetail {
-  date: string;
-  typeMove: string;
-}
-
-interface TripChainEntry {
-  tripNo: number;
-  date: string;
-  onLocation: string;
-  offLocation: string;
-  connected: boolean;
-  typeMove: string;
-  // DONE when the very next trip's ON location matches this trip's OFF location,
-  // meaning the vehicle picked up from where it dropped. Otherwise ACTIVE.
-  status: "ACTIVE" | "DONE";
-}
-
 interface RouteSummary {
   routeKey: string;
   origin: string;
   destination: string;
   count: number;
-  trips: TripDetail[];
 }
 
 interface TimeAnalysis {
@@ -102,7 +81,7 @@ function parseDate(value: unknown): Date | undefined {
   return undefined;
 }
 
-export default function TripAnalysisPage() {
+export default function TripAnalysisClient({ fileId }: { fileId: string | null }) {
   const router = useRouter();
   const { user } = useCurrentUser();
 
@@ -110,24 +89,19 @@ export default function TripAnalysisPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedVehicle, setSelectedVehicle] = useState<string>("");
-  const [fileId, setFileId] = useState<string | null>(null);
-
-  const [vehicleNotesModalOpen, setVehicleNotesModalOpen] = useState(false);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    setFileId(params.get("id"));
-  }, []);
+    if (!fileId) {
+      const dashboardPath =
+        user?.role === "ADMIN" ? "/admin/dashboard" : "/manager/dashboard";
+      router.push(dashboardPath);
+      return;
+    }
 
-  useEffect(() => {
     let cancelled = false;
     const run = async () => {
       try {
         setLoading(true);
-        if (!fileId) {
-          throw new Error("Missing sheet id in URL");
-        }
         const res = await fetch(`${API_BASE_URL}/api/excel/${fileId}`, {
           credentials: "include",
         });
@@ -171,7 +145,6 @@ export default function TripAnalysisPage() {
     topRoutes,
     timeAnalysis,
     distanceAnalysis,
-    tripChain,
   } = useMemo(() => {
     if (!file) {
       return {
@@ -194,7 +167,6 @@ export default function TripAnalysisPage() {
         distanceAnalysis: {
           samples: 0,
         } as DistanceAnalysis,
-        tripChain: [] as TripChainEntry[],
       };
     }
 
@@ -366,16 +338,9 @@ export default function TripAnalysisPage() {
             origin: o || "Unknown",
             destination: d || "Unknown",
             count: 0,
-            trips: [],
           };
         }
         byRoute[routeKey].count += 1;
-        const tripDate = dateHeader ? String(row[dateHeader] ?? "").trim() : "";
-        const tripMove = typeMovesHeader ? String(row[typeMovesHeader] ?? "").trim() : "";
-        byRoute[routeKey].trips.push({
-          date: tripDate || "—",
-          typeMove: tripMove || "—",
-        });
       }
 
       if (factoryReachHeader && factoryOutHeader) {
@@ -434,61 +399,6 @@ export default function TripAnalysisPage() {
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
 
-    // Build trip ON/OFF chain sorted by date
-    const sortedTrips = [...filteredRows].sort((a, b) => {
-      const da = dateHeader ? parseDate(a[dateHeader]) : undefined;
-      const db = dateHeader ? parseDate(b[dateHeader]) : undefined;
-      if (da && db) return da.getTime() - db.getTime();
-      return 0;
-    });
-
-    // ── Build raw entries first (status determined in a second pass) ──────────
-    interface RawEntry {
-      tripNo: number; date: string; onLocation: string;
-      offLocation: string; connected: boolean; typeMove: string;
-    }
-    const rawEntries: RawEntry[] = [];
-
-    sortedTrips
-      .filter(() => originHeader || destinationHeader)
-      .forEach((row, idx, arr) => {
-        const origin = originHeader ? String(row[originHeader] ?? "").trim() : "";
-        const dest   = destinationHeader ? String(row[destinationHeader] ?? "").trim() : "";
-        const prevDest = idx > 0
-          ? (destinationHeader ? String(arr[idx - 1][destinationHeader] ?? "").trim() : "")
-          : "";
-        const connected =
-          idx > 0 &&
-          prevDest !== "" &&
-          origin !== "" &&
-          prevDest.toLowerCase() === origin.toLowerCase();
-
-        rawEntries.push({
-          tripNo: idx + 1,
-          date: dateHeader ? String(row[dateHeader] ?? "").trim() || "—" : "—",
-          onLocation: origin || "—",
-          offLocation: dest || "—",
-          connected,
-          typeMove: typeMovesHeader ? String(row[typeMovesHeader] ?? "").trim() || "—" : "—",
-        });
-      });
-
-    // ── Status rule: a trip is DONE when the next trip's ON = this trip's OFF ─
-    // (vehicle was picked up from where it was dropped → leg is closed)
-    // Last trip always stays ACTIVE (no next trip to confirm delivery).
-    const tripChain: TripChainEntry[] = rawEntries.map((entry, i) => {
-      const next = rawEntries[i + 1];
-      const offNorm = entry.offLocation.toLowerCase();
-      const status: "ACTIVE" | "DONE" =
-        next &&
-        entry.offLocation !== "—" &&
-        next.onLocation !== "—" &&
-        next.onLocation.toLowerCase() === offNorm
-          ? "DONE"
-          : "ACTIVE";
-      return { ...entry, status };
-    });
-
     return {
       vehicleHeader,
       statusHeader,
@@ -502,7 +412,6 @@ export default function TripAnalysisPage() {
       maxTripCount,
       customerSummary,
       topRoutes,
-      tripChain,
       timeAnalysis: {
         factorySamples,
         avgFactoryStayHours:
@@ -596,30 +505,19 @@ export default function TripAnalysisPage() {
               )}
             </div>
             {vehicleOptions.length > 0 && (
-              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                <div className="flex items-center gap-2">
-                  <label className="text-xs text-slate-300">Vehicle</label>
-                  <select
-                    value={selectedVehicle}
-                    onChange={(e) => setSelectedVehicle(e.target.value)}
-                    className="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-100 min-w-[140px]"
-                  >
-                    {vehicleOptions.map((v) => (
-                      <option key={v} value={v}>
-                        {v}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {selectedVehicle && (
-                  <button
-                    type="button"
-                    onClick={() => setVehicleNotesModalOpen(true)}
-                    className="inline-flex items-center justify-center px-3 py-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/50 text-xs font-medium text-cyan-300 hover:bg-cyan-500/25"
-                  >
-                    Vehicle notes
-                  </button>
-                )}
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-slate-300">Vehicle</label>
+                <select
+                  value={selectedVehicle}
+                  onChange={(e) => setSelectedVehicle(e.target.value)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-100"
+                >
+                  {vehicleOptions.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
               </div>
             )}
           </div>
@@ -670,162 +568,251 @@ export default function TripAnalysisPage() {
           )}
         </section>
 
-        {vehicleNotesModalOpen && selectedVehicle && fileId && (
-          <VehicleTripSheetModal
-            open={vehicleNotesModalOpen}
-            onClose={() => setVehicleNotesModalOpen(false)}
-            fileId={fileId}
-            vehicleNumber={selectedVehicle}
-          />
-        )}
-
-        <section className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-100">Common routes</h3>
-              <p className="text-xs text-slate-400 mt-0.5">
-                All trips with route, date and move type.
-              </p>
-            </div>
-            {topRoutes.length > 0 && (
-              <span className="text-[11px] text-slate-400">
-                {topRoutes.reduce((s, r) => s + r.trips.length, 0)} trip
-                {topRoutes.reduce((s, r) => s + r.trips.length, 0) === 1 ? "" : "s"}
-              </span>
-            )}
-          </div>
-
-          {topRoutes.length === 0 ? (
-            <p className="px-4 py-6 text-xs text-slate-400">
-              No origin / destination columns found for this sheet.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-xs">
-                <thead className="bg-slate-800/80">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">Route</th>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">Trip Date</th>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">Type / Move</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {topRoutes.map((r) =>
-                    r.trips.map((t, i) => (
-                      <tr key={`${r.routeKey}-${i}`} className="hover:bg-slate-800/60 transition-colors">
-                        <td className="px-3 py-2 text-slate-100 whitespace-nowrap font-medium">
-                          {r.origin}
-                          <span className="mx-1 text-slate-500">→</span>
-                          {r.destination}
-                        </td>
-                        <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{t.date}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">
-                          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium border ${
-                            t.typeMove.toUpperCase().includes("DRY")
-                              ? "bg-amber-500/10 border-amber-500/40 text-amber-300"
-                              : t.typeMove === "—"
-                              ? "bg-slate-800 border-slate-700 text-slate-400"
-                              : "bg-cyan-500/10 border-cyan-500/40 text-cyan-300"
-                          }`}>
-                            {t.typeMove}
-                          </span>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-
-        <section className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-100">Trip ON / OFF sequence</h3>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Consecutive trips — if the next trip&apos;s ON location matches the previous OFF, they are linked.
-              </p>
-            </div>
-            {tripChain.length > 0 && (
-              <span className="text-[11px] text-slate-400">{tripChain.length} trip{tripChain.length === 1 ? "" : "s"}</span>
-            )}
-          </div>
-
-          {tripChain.length === 0 ? (
-            <p className="px-4 py-6 text-xs text-slate-400">
-              No origin / destination data found for this vehicle.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-xs">
-                <thead className="bg-slate-800/80">
-                  <tr>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">#</th>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">Date</th>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">ON (Origin)</th>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">OFF (Destination)</th>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">Type / Move</th>
-                    <th className="px-3 py-2 text-left font-semibold text-slate-300 whitespace-nowrap">Trip Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800">
-                  {tripChain.map((t, idx) => (
-                    <tr
-                      key={idx}
-                      className={`transition-colors ${
-                        t.status === "DONE"
-                          ? "bg-emerald-950/20 hover:bg-emerald-950/40"
-                          : "hover:bg-slate-800/50"
-                      }`}
-                    >
-                      <td className="px-3 py-2 text-slate-400 font-mono">{t.tripNo}</td>
-                      <td className="px-3 py-2 text-slate-300 whitespace-nowrap">{t.date}</td>
-                      <td className="px-3 py-2 whitespace-nowrap">
-                        <span className="inline-flex items-center gap-1.5 font-medium text-slate-100">
-                          <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 shrink-0" />
-                          {t.onLocation}
+        <section className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    Trips by month
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    How many trips this vehicle runs each month.
+                  </p>
+                </div>
+              </div>
+              {tripsByMonth.length === 0 ? (
+                <p className="text-xs text-slate-400">
+                  Not enough data to draw a monthly chart.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {tripsByMonth.map((m) => (
+                    <div key={m.month} className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-slate-200">
+                          {m.month || "Unknown month"}
                         </span>
-                        {!t.connected && (
-                          <span className="ml-2 text-[10px] text-cyan-500 font-semibold tracking-wide">BASE</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 whitespace-nowrap">
-                        <span className="inline-flex items-center gap-1.5 font-medium text-slate-100">
-                          <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${t.status === "DONE" ? "bg-emerald-400" : "bg-rose-400"}`} />
-                          {t.offLocation}
+                        <span className="text-[11px] text-slate-400">
+                          {m.totalTrips} trip{m.totalTrips === 1 ? "" : "s"}
                         </span>
-                      </td>
-                      <td className="px-3 py-2 whitespace-nowrap">
-                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium border ${
-                          t.typeMove.toUpperCase().includes("DRY")
-                            ? "bg-amber-500/10 border-amber-500/40 text-amber-300"
-                            : t.typeMove === "—"
-                            ? "bg-slate-800 border-slate-700 text-slate-400"
-                            : "bg-cyan-500/10 border-cyan-500/40 text-cyan-300"
-                        }`}>
-                          {t.typeMove}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 whitespace-nowrap">
-                        {t.status === "DONE" ? (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 border border-emerald-500/50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
-                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-none" />
-                            DONE
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 border border-amber-500/40 px-2.5 py-0.5 text-[11px] font-semibold text-amber-300">
-                            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-                            ACTIVE
-                          </span>
-                        )}
-                      </td>
-                    </tr>
+                      </div>
+                      <div className="h-3 rounded-md bg-slate-800 overflow-hidden flex">
+                        <div
+                          className="h-full bg-cyan-500/80 transition-all"
+                          style={{
+                            width: `${(m.totalTrips / maxTripCount) * 100}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
                   ))}
-                </tbody>
-              </table>
+                </div>
+              )}
             </div>
-          )}
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    Trips by movement type
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Split between DRY / TRIP (or similar Type‑Moves values).
+                  </p>
+                </div>
+              </div>
+              {typeMoveSummary.length === 0 ? (
+                <p className="text-xs text-slate-400">
+                  No Type‑Moves column found for this sheet.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {typeMoveSummary.map((t) => (
+                    <div
+                      key={t.typeMove}
+                      className="px-3 py-2 rounded-lg bg-slate-950/40 border border-slate-800 text-xs text-slate-100 flex items-center gap-2"
+                    >
+                      <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-cyan-500/15 border border-cyan-500/40 text-[10px] text-cyan-300 font-semibold">
+                        {t.count}
+                      </span>
+                      <span className="font-medium">
+                        {t.typeMove || "Unknown"}
+                      </span>
+                      <span className="text-slate-400 text-[11px]">
+                        trip{t.count === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    Top customers
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Based on the &quot;Current Project&quot; / customer column.
+                  </p>
+                </div>
+              </div>
+              {customerSummary.length === 0 ? (
+                <p className="text-xs text-slate-400">
+                  No customer / project column found for this sheet.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {customerSummary.map((c) => (
+                    <div
+                      key={c.customer}
+                      className="px-3 py-2 rounded-lg bg-slate-950/40 border border-slate-800 text-xs text-slate-100 flex items-center justify-between gap-2"
+                    >
+                      <span className="truncate max-w-[180px]">{c.customer}</span>
+                      <span className="inline-flex items-center gap-1 text-[11px] text-cyan-300">
+                        <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+                        {c.count} trip{c.count === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    Common routes
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Origin → Destination pairs this vehicle runs most often.
+                  </p>
+                </div>
+              </div>
+              {topRoutes.length === 0 ? (
+                <p className="text-xs text-slate-400">
+                  No origin / destination columns found for this sheet.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {topRoutes.map((r) => (
+                    <div
+                      key={r.routeKey}
+                      className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-slate-950/40 border border-slate-800 text-xs text-slate-100"
+                    >
+                      <div className="flex flex-col">
+                        <span className="font-medium">
+                          {r.origin} → {r.destination}
+                        </span>
+                      </div>
+                      <span className="inline-flex items-center gap-1 text-[11px] text-slate-300">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        {r.count} trip{r.count === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    Factory & destination timings
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Average hours inside factory and at destination.
+                  </p>
+                </div>
+              </div>
+              {(!timeAnalysis.avgFactoryStayHours &&
+                !timeAnalysis.avgDestUnloadHours) ? (
+                <p className="text-xs text-slate-400">
+                  Not enough timing data to calculate averages.
+                </p>
+              ) : (
+                <div className="space-y-2 text-xs text-slate-200">
+                  <div>
+                    <p className="text-slate-400 mb-0.5">
+                      Average time inside factory
+                    </p>
+                    <p className="text-sm font-semibold text-cyan-400">
+                      {timeAnalysis.avgFactoryStayHours
+                        ? `${timeAnalysis.avgFactoryStayHours.toFixed(1)} hrs`
+                        : "—"}
+                    </p>
+                    {timeAnalysis.factorySamples > 0 && (
+                      <p className="text-[11px] text-slate-500">
+                        Over {timeAnalysis.factorySamples} trip
+                        {timeAnalysis.factorySamples === 1 ? "" : "s"}.
+                      </p>
+                    )}
+                  </div>
+                  <div className="pt-1 border-t border-slate-800/80 mt-1">
+                    <p className="text-slate-400 mb-0.5">
+                      Avg unloading time at destination
+                    </p>
+                    <p className="text-sm font-semibold text-emerald-400">
+                      {timeAnalysis.avgDestUnloadHours
+                        ? `${timeAnalysis.avgDestUnloadHours.toFixed(1)} hrs`
+                        : "—"}
+                    </p>
+                    {timeAnalysis.destSamples > 0 && (
+                      <p className="text-[11px] text-slate-500">
+                        Over {timeAnalysis.destSamples} trip
+                        {timeAnalysis.destSamples === 1 ? "" : "s"}.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    Distance overview
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Total Trip KM vs GPS KM vs Approval KM.
+                  </p>
+                </div>
+              </div>
+              {!distanceAnalysis.totalTripKm &&
+              !distanceAnalysis.totalGpsKm &&
+              !distanceAnalysis.totalApprovalKm ? (
+                <p className="text-xs text-slate-400">
+                  Not enough distance data to calculate totals.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+                    <p className="text-slate-400 mb-1">Total Trip KM</p>
+                    <p className="text-lg font-semibold text-cyan-400">
+                      {distanceAnalysis.totalTripKm?.toFixed(0) ?? "—"}
+                    </p>
+                  </div>
+                  <div className="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+                    <p className="text-slate-400 mb-1">Total GPS KM</p>
+                    <p className="text-lg font-semibold text-indigo-400">
+                      {distanceAnalysis.totalGpsKm?.toFixed(0) ?? "—"}
+                    </p>
+                  </div>
+                  <div className="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+                    <p className="text-slate-400 mb-1">Total Approval KM</p>
+                    <p className="text-lg font-semibold text-emerald-400">
+                      {distanceAnalysis.totalApprovalKm?.toFixed(0) ?? "—"}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </section>
 
         <section className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">

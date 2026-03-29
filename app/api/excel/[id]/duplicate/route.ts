@@ -20,31 +20,45 @@ export async function POST(
 
     await connectDB();
 
-    const originalFile = await ExcelFile.findOne({
-      _id: id,
+    // Use collection.findOne so all MongoDB fields (including celldata) are
+    // returned regardless of the Mongoose model's cached schema.
+    const originalFile = await ExcelFile.collection.findOne({
+      _id: new mongoose.Types.ObjectId(id),
       ownerId: new mongoose.Types.ObjectId(user.id),
-    });
+    }) as any;
 
     if (!originalFile) {
       return NextResponse.json({ message: "File not found" }, { status: 404 });
     }
 
-    const duplicatedFile = await ExcelFile.create({
+    // Insert via collection.insertOne so celldata is written even if the
+    // compiled Mongoose model predates the celldata field in the schema.
+    const now = new Date();
+    const docToInsert: Record<string, any> = {
       ownerId: new mongoose.Types.ObjectId(user.id),
       name: `${originalFile.name} (Copy)`,
-      headers: [...originalFile.headers],
-      rows: JSON.parse(JSON.stringify(originalFile.rows)),
-    });
+      headers: [...(originalFile.headers ?? [])],
+      rows: JSON.parse(JSON.stringify(originalFile.rows ?? [])),
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // Copy celldata (stores all styles — bg colours, text colours, bold, etc.)
+    if (Array.isArray(originalFile.celldata) && originalFile.celldata.length > 0) {
+      docToInsert.celldata = JSON.parse(JSON.stringify(originalFile.celldata));
+    }
+
+    const insertResult = await ExcelFile.collection.insertOne(docToInsert);
 
     return NextResponse.json({
       message: "File duplicated successfully",
       file: {
-        id: duplicatedFile._id.toString(),
-        name: duplicatedFile.name,
-        headers: duplicatedFile.headers,
-        rowCount: duplicatedFile.rows.length,
-        createdAt: duplicatedFile.createdAt,
-        updatedAt: duplicatedFile.updatedAt,
+        id: insertResult.insertedId.toString(),
+        name: docToInsert.name,
+        headers: docToInsert.headers,
+        rowCount: (docToInsert.rows as any[]).length,
+        createdAt: docToInsert.createdAt,
+        updatedAt: docToInsert.updatedAt,
       },
     });
   } catch (error) {

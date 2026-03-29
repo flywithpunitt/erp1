@@ -165,7 +165,7 @@ export default function ManagerDashboardPage() {
 
   const templates = [
     { value: "blank", label: "Blank Spreadsheet" },
-    { value: "vehicle", label: "Vehicle Register" },
+    { value: "vehicle", label: "Vehicle Registration" },
     { value: "driver", label: "Driver Log" },
     { value: "expense", label: "Expense Tracker" },
   ];

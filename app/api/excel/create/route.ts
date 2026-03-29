@@ -4,10 +4,71 @@ import connectDB from "@/lib/db";
 import ExcelFile from "@/lib/models/ExcelFile";
 import { getAuthUser, requireManager } from "@/lib/auth";
 
-const TEMPLATES: Record<string, { name: string; headers: string[] }> = {
+// 8 column keys — A through H — reused across every section (mirrors Excel column letters)
+const COLS = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
+
+function r(values: Partial<Record<"A"|"B"|"C"|"D"|"E"|"F"|"G"|"H", string>>): Record<string, string> {
+  const row: Record<string, string> = {};
+  for (const c of COLS) row[c] = values[c] ?? "";
+  return row;
+}
+
+function buildVehicleRegRows(): Record<string, any>[] {
+  return [
+    // ── TRIP INFO ─────────────────────────────────────────────────────────────
+    { ...r({ A: "Vehicle No.", B: "Route", C: "Start Date", D: "End Date", E: "Departure Time", F: "Notes" }), __bg: "#D9D9D9", __bold: true },
+    r({ A: "", B: "", C: "", D: "", E: "", F: "" }),
+
+    // blank separator
+    r({}),
+
+    // ── CASH ADVANCES ────────────────────────────────────────────────────────
+    { ...r({ A: "CASH ADVANCES", B: "Date", C: "Description", D: "Amount (INR)" }), __bg: "#D9D9D9", __bold: true },
+    r({ A: "", B: "", C: "Advance 1",    D: "" }),
+    r({ A: "", B: "", C: "Advance 2",    D: "" }),
+    r({ A: "", B: "", C: "Total Advance", D: "" }),
+
+    // blank separator
+    r({}),
+
+    // ── DIESEL LOG ───────────────────────────────────────────────────────────
+    { ...r({ A: "DIESEL LOG", B: "Date", C: "Location", D: "Litres", E: "Amount (INR)" }), __bg: "#D9D9D9", __bold: true },
+    r({ A: "", B: "", C: "", D: "", E: "" }),
+    r({ A: "", B: "", C: "", D: "", E: "" }),
+    r({ A: "", B: "", C: "", D: "", E: "" }),
+    r({ A: "", B: "", C: "", D: "", E: "" }),
+    r({ A: "", B: "", C: "", D: "", E: "" }),
+    r({ A: "", B: "", C: "", D: "", E: "" }),
+    r({ A: "", B: "", C: "", D: "Total Diesel", E: "" }),
+
+    // blank separator
+    r({}),
+
+    // ── KM & RUNNING ─────────────────────────────────────────────────────────
+    { ...r({ A: "KM & RUNNING", B: "Total KM", C: "MT Empty KM", D: "Load KM", E: "MT Rate/km", F: "Load Rate/km", G: "MT Charges", H: "Load Charges" }), __bg: "#D9D9D9", __bold: true },
+    r({ A: "", B: "", C: "", D: "", E: "", F: "", G: "", H: "" }),
+
+    // blank separator
+    r({}),
+
+    // ── TRIP EXPENSES ────────────────────────────────────────────────────────
+    { ...r({ A: "TRIP EXPENSES", B: "Chennai Fooding", C: "Kanta Slip", D: "RTO Challan", E: "Polythene", F: "Belt & Cargo Net", G: "Total Expenses" }), __bg: "#D9D9D9", __bold: true },
+    r({ A: "", B: "", C: "", D: "", E: "", F: "", G: "" }),
+
+    // blank separator
+    r({}),
+
+    // ── TRIP SUMMARY ─────────────────────────────────────────────────────────
+    { ...r({ A: "TRIP SUMMARY", B: "Gross Earnings", C: "Diesel Cost", D: "MT Charges", E: "Load Charges", F: "Other Expenses", G: "Total Cost", H: "Driver Balance" }), __bg: "#D9D9D9", __bold: true },
+    r({ A: "", B: "", C: "", D: "", E: "", F: "", G: "", H: "" }),
+  ];
+}
+
+const TEMPLATES: Record<string, { name: string; headers: string[]; rows?: Record<string, any>[] }> = {
   vehicle: {
-    name: "Vehicle Register",
-    headers: ["Vehicle ID", "Make", "Model", "Year", "Registration", "Status", "Last Service"],
+    name: "Vehicle Registration",
+    headers: [...COLS],           // columns are just A B C D E F G H
+    rows: buildVehicleRegRows(),
   },
   driver: {
     name: "Driver Log",
@@ -34,15 +95,17 @@ export async function POST(request: NextRequest) {
     await connectDB();
 
     let fileHeaders: string[] = [];
+    let fileRows: Record<string, any>[] = [];
     let fileName = name || "New Spreadsheet";
 
     if (template && TEMPLATES[template]) {
       fileHeaders = [...TEMPLATES[template].headers];
-      if (!name) {
-        fileName = TEMPLATES[template].name;
-      }
+      fileRows   = TEMPLATES[template].rows ? [...TEMPLATES[template].rows!] : [];
+      if (!name) fileName = TEMPLATES[template].name;
     } else if (headers && Array.isArray(headers)) {
-      fileHeaders = headers.filter((h: any) => typeof h === "string" && h.trim()).map((h: string) => h.trim());
+      fileHeaders = headers
+        .filter((h: any) => typeof h === "string" && h.trim())
+        .map((h: string) => h.trim());
     } else {
       fileHeaders = ["Column 1", "Column 2", "Column 3"];
     }
@@ -55,7 +118,7 @@ export async function POST(request: NextRequest) {
       ownerId: new mongoose.Types.ObjectId(user.id),
       name: fileName,
       headers: fileHeaders,
-      rows: [],
+      rows: fileRows,
     });
 
     return NextResponse.json({
@@ -64,7 +127,7 @@ export async function POST(request: NextRequest) {
         id: excelFile._id.toString(),
         name: excelFile.name,
         headers: excelFile.headers,
-        rowCount: 0,
+        rowCount: fileRows.length,
         createdAt: excelFile.createdAt,
         updatedAt: excelFile.updatedAt,
       },
@@ -80,4 +143,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ message: "Failed to create file" }, { status: 500 });
   }
 }
-

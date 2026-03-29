@@ -17,6 +17,7 @@ interface ExcelFile {
   name: string;
   headers: string[];
   rows: Record<string, any>[];
+  celldata?: LuckysheetCellValue[] | null;
 }
 
 declare global {
@@ -36,7 +37,8 @@ declare global {
 interface LuckysheetCellValue {
   r: number;
   c: number;
-  v: string | number | { v: string | number; m?: string; ct?: unknown };
+  // v can be a primitive OR a full Luckysheet cell object (bg, fc, bl, it, fs, …)
+  v: any;
 }
 
 interface LuckysheetSheet {
@@ -47,7 +49,8 @@ interface LuckysheetSheet {
   row?: number;
   column?: number;
   celldata?: LuckysheetCellValue[];
-  data?: (string | number | null)[][];
+  // data is Luckysheet's live 2D array — each element is a cell object or null
+  data?: any[][];
   config?: Record<string, unknown>;
 }
 
@@ -70,34 +73,60 @@ function toCellValue(val: unknown): string | number {
   return String(val);
 }
 
-// Build Luckysheet celldata from headers + rows
+// Build Luckysheet celldata from headers + rows.
+// The header row is suppressed (data starts at r=0) when every header is:
+//   - a single uppercase letter  (A–Z)   ← template column keys
+//   - an empty string                     ← blank header cell saved after a round-trip
+//   - "Column N" auto-label               ← old fallback we no longer generate but may exist in DB
+// This prevents phantom "Column 7" / "Column 8" cells from appearing after save/reload.
 function buildSheetData(
   headers: string[],
   rows: Record<string, any>[]
 ): LuckysheetSheet {
   const celldata: LuckysheetCellValue[] = [];
   const colCount = Math.max(headers.length, 1);
-  const rowCount = Math.max(1, rows.length + 1); // +1 for header row
 
-  // Header row (row 0)
-  headers.forEach((h, c) => {
-    celldata.push({
-      r: 0,
-      c,
-      v: toCellValue(h),
+  const isSingleLetterHeaders = headers.every(
+    (h) => /^[A-Z]$/.test(h) || h === "" || /^Column \d+$/.test(h)
+  );
+  const dataStartRow = isSingleLetterHeaders ? 0 : 1;
+  const rowCount = Math.max(1, rows.length + dataStartRow);
+
+  // Only render the header row when headers have meaningful names
+  if (!isSingleLetterHeaders) {
+    headers.forEach((h, c) => {
+      celldata.push({ r: 0, c, v: toCellValue(h) });
     });
-  });
+  }
 
-  // Data rows
+  // Data rows — support optional __bg (background colour) and __bold per row
   rows.forEach((row, r) => {
+    const rowBg: string | undefined = typeof row?.__bg === "string" ? row.__bg : undefined;
+    const rowBold: boolean = !!row?.__bold;
+
     headers.forEach((h, c) => {
       const val = row?.[h];
-      if (val !== undefined && val !== null && val !== "") {
+      const hasValue = val !== undefined && val !== null && val !== "";
+
+      // For styled rows we must push ALL columns (even empty) so Luckysheet
+      // applies the background across the full row width.
+      if (!hasValue && !rowBg) return;
+
+      const primitive = toCellValue(hasValue ? val : "");
+
+      if (rowBg || rowBold) {
         celldata.push({
-          r: r + 1,
+          r: r + dataStartRow,
           c,
-          v: toCellValue(val),
+          v: {
+            v: primitive,
+            m: String(primitive),
+            ...(rowBg   ? { bg: rowBg }  : {}),
+            ...(rowBold ? { bl: 1 }       : {}),
+          },
         });
+      } else {
+        celldata.push({ r: r + dataStartRow, c, v: primitive });
       }
     });
   });
@@ -128,20 +157,18 @@ function cellToValue(cell: unknown): string | number {
 }
 
 // Extract headers and rows from Luckysheet sheet data (cells may be objects).
-// Use "Column N" for empty headers so we never drop columns (e.g. value in H2 when H1 is empty).
+// Blank header cells are kept as empty string — never auto-generated as "Column N"
+// so that round-tripping through save/load never injects phantom column names.
 function sheetDataToHeadersRows(
   data: (string | number | null | Record<string, unknown>)[][] | undefined
 ): { headers: string[]; rows: Record<string, any>[] } {
   if (!data || data.length === 0) {
-    return { headers: ["Column 1"], rows: [] };
+    return { headers: [""], rows: [] };
   }
   const rawHeaderRow = data[0] || [];
-  const numCols = rawHeaderRow.length;
-  const headers = rawHeaderRow.map((c, i) => {
-    const label = String(cellToValue(c)).trim();
-    return label || `Column ${i + 1}`;
-  });
-  const safeHeaders = headers.length ? headers : ["Column 1"];
+  // Preserve blank cells as "" — never fall back to "Column N"
+  const headers = rawHeaderRow.map((c) => String(cellToValue(c)).trim());
+  const safeHeaders = headers.length ? headers : [""];
   const rows = data.slice(1).map((row) => {
     const obj: Record<string, any> = {};
     safeHeaders.forEach((h, i) => {
@@ -216,7 +243,7 @@ function ExcelEditContent() {
   const [sheetLoadFailed, setSheetLoadFailed] = useState(false);
   const [sheetInitialized, setSheetInitialized] = useState(false);
 
-  const initialDataRef = useRef<{ headers: string[]; rows: Record<string, any>[] } | null>(null);
+  const initialDataRef = useRef<{ headers: string[]; rows: Record<string, any>[]; celldata?: LuckysheetCellValue[] | null } | null>(null);
   const luckysheetInitializedRef = useRef(false);
   const scriptsLoadedRef = useRef(false);
 
@@ -259,8 +286,20 @@ function ExcelEditContent() {
           }
         }
         if (headers.length === 0) headers = ["Column 1"];
+        const loadedCelldata = Array.isArray(fileData.celldata) && fileData.celldata.length > 0
+          ? fileData.celldata : null;
+        console.log("[LOAD-DEBUG] celldata from DB:", loadedCelldata ? `${loadedCelldata.length} cells` : "NONE — will use headers/rows");
+        if (loadedCelldata) {
+          // Log first styled cell from DB
+          for (const cell of loadedCelldata) {
+            if (cell?.v?.bg || cell?.v?.fc) {
+              console.log("[LOAD-DEBUG] first styled cell in DB celldata:", JSON.stringify(cell));
+              break;
+            }
+          }
+        }
         setFile(fileData);
-        initialDataRef.current = { headers, rows: JSON.parse(JSON.stringify(rowsRaw)) };
+        initialDataRef.current = { headers, rows: JSON.parse(JSON.stringify(rowsRaw)), celldata: loadedCelldata };
         setError("");
         if (!cancelled) tryInitLuckysheet();
       } catch (err) {
@@ -294,7 +333,25 @@ function ExcelEditContent() {
     } catch (_) {}
 
     luckysheetInitializedRef.current = true;
-    const sheet = buildSheetData(data.headers, data.rows);
+
+    // If we have saved celldata (includes styles like bg/bl), use it directly.
+    // Otherwise rebuild from headers+rows (first-time load from template).
+    const sheet: LuckysheetSheet = data.celldata && data.celldata.length > 0
+      ? (() => {
+          const maxRow = data.celldata!.reduce((m, c) => Math.max(m, (c.r ?? 0) + 1), 0);
+          const maxCol = data.celldata!.reduce((m, c) => Math.max(m, (c.c ?? 0) + 1), 0);
+          return {
+            name: "Sheet1",
+            index: 0,
+            status: 1,
+            order: 0,
+            row: Math.max(maxRow + 20, 50),
+            column: Math.max(maxCol + 5, 18),
+            celldata: data.celldata,
+            config: {},
+          };
+        })()
+      : buildSheetData(data.headers, data.rows);
 
     const opts = {
       container: LUCKYSHEET_CONTAINER_ID,
@@ -311,7 +368,21 @@ function ExcelEditContent() {
           console.error("Luckysheet not loaded yet")
           return
         }
-    
+
+        // Clear Luckysheet's localStorage cache immediately before create() so
+        // it always uses our DB data and never shows "Local cache restored".
+        // This must run inside RAF (same microtask as create) to prevent
+        // Luckysheet re-writing the cache between our clear and the create call.
+        try {
+          if (typeof localStorage !== "undefined") {
+            // Remove the known primary key first, then sweep for anything else
+            localStorage.removeItem("luckysheetfile");
+            Object.keys(localStorage)
+              .filter((k) => /luckysheet/i.test(k))
+              .forEach((k) => localStorage.removeItem(k));
+          }
+        } catch (_) {}
+
         win.luckysheet.create(opts)
         setSheetInitialized(true)
       } catch (err) {
@@ -381,6 +452,83 @@ function ExcelEditContent() {
     const maxRows = Math.min(Math.max(first?.row ?? 80, 40), 150);
     const maxCols = Math.min(Math.max(first?.column ?? 20, 15), 40);
 
+    // ── Generic style-preserving celldata capture ────────────────────────────
+    // Goal: capture every cell object including user-applied styles (bg, fc, bl, …).
+    // Luckysheet's live state is in luckysheetfile[0].data (2D array of cell objects).
+    // We try four sources in order of reliability:
+    let rawCelldata: LuckysheetCellValue[] | undefined;
+
+    // Resolve the live 2D data array (luckysheetfile has it; getAllSheets() is a deep copy)
+    const internalSheet = win.luckysheetfile?.[0];
+    const liveData: any[][] | null =
+      Array.isArray(internalSheet?.data) && internalSheet.data.length > 0
+        ? internalSheet.data
+        : Array.isArray(first?.data) && first.data.length > 0
+        ? first.data
+        : null;
+
+    console.log("[SAVE-DEBUG] luckysheetfile[0] exists:", !!internalSheet);
+    console.log("[SAVE-DEBUG] liveData rows:", liveData?.length ?? "NULL");
+    console.log("[SAVE-DEBUG] getAllSheets[0].celldata length:", first?.celldata?.length ?? 0);
+    // Log first coloured cell if any
+    if (liveData) {
+      for (let r = 0; r < liveData.length; r++) {
+        const row = liveData[r]; if (!Array.isArray(row)) continue;
+        for (let c = 0; c < row.length; c++) {
+          const cell = row[c];
+          if (cell && (cell.bg || cell.fc)) {
+            console.log(`[SAVE-DEBUG] styled cell found at r=${r} c=${c}:`, JSON.stringify(cell));
+            break;
+          }
+        }
+      }
+    }
+
+    // Source 1: Luckysheet's own transToCellData (live 2D → sparse)
+    if (liveData && typeof ls.transToCellData === "function") {
+      try {
+        const converted = ls.transToCellData(liveData);
+        if (Array.isArray(converted) && converted.length > 0) {
+          rawCelldata = converted as LuckysheetCellValue[];
+          console.log("[SAVE-DEBUG] Source1 transToCellData: cells=", rawCelldata.length);
+        }
+      } catch (_) {}
+    }
+
+    // Source 2: manual sparse conversion — guaranteed to include style-only cells
+    // (transToCellData sometimes skips cells where v is null but styling exists)
+    if (!rawCelldata?.length && liveData) {
+      const manual: LuckysheetCellValue[] = [];
+      for (let r = 0; r < liveData.length; r++) {
+        const row = liveData[r];
+        if (!Array.isArray(row)) continue;
+        for (let c = 0; c < row.length; c++) {
+          const cell = row[c];
+          if (cell !== null && cell !== undefined) {
+            manual.push({ r, c, v: cell });
+          }
+        }
+      }
+      if (manual.length > 0) {
+        rawCelldata = manual;
+        console.log("[SAVE-DEBUG] Source2 manual: cells=", rawCelldata.length);
+      }
+    }
+
+    // Source 3: getAllSheets celldata (deep copy of input — may be live in some builds)
+    if (!rawCelldata?.length && Array.isArray(first?.celldata) && first.celldata.length > 0) {
+      rawCelldata = first.celldata as LuckysheetCellValue[];
+      console.log("[SAVE-DEBUG] Source3 getAllSheets celldata: cells=", rawCelldata.length);
+    }
+
+    // Source 4: original input celldata (stale but non-empty — last resort)
+    if (!rawCelldata?.length && Array.isArray(internalSheet?.celldata) && internalSheet.celldata.length > 0) {
+      rawCelldata = internalSheet.celldata as LuckysheetCellValue[];
+      console.log("[SAVE-DEBUG] Source4 input celldata: cells=", rawCelldata.length);
+    }
+
+    console.log("[SAVE-DEBUG] final rawCelldata:", rawCelldata ? `${rawCelldata.length} cells` : "NONE — styles will NOT be saved");
+
     // 1) Prefer getCellValue so we get LIVE edits (e.g. "yuy" in D1). .data is often stale.
     if (typeof ls.getCellValue === "function") {
       const fromCells = buildGridFromCells(ls, maxRows, maxCols);
@@ -423,7 +571,14 @@ function ExcelEditContent() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ name: file.name, headers, rows }),
+        // Only include celldata when we successfully captured it.
+        // Sending celldata: null would erase previously-saved styling in the DB.
+        body: JSON.stringify({
+          name: file.name,
+          headers,
+          rows,
+          ...(rawCelldata && rawCelldata.length > 0 ? { celldata: rawCelldata } : {}),
+        }),
       });
 
       const data = await res.json().catch(() => ({}));
