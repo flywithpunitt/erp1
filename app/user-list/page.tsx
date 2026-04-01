@@ -65,6 +65,33 @@ export default function UserListPage() {
     }
   };
 
+  const handleDeleteUser = async (userId: string, role: string) => {
+    if (role !== "MANAGER") {
+      return;
+    }
+
+    const confirmed = window.confirm("Are you sure you want to delete this manager?");
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/users/${userId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message || "Failed to delete user");
+      }
+
+      setUsers((prev) => prev.filter((u) => u.id !== userId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete user");
+    }
+  };
+
   const adminCount = users.filter((u) => u.role === "ADMIN").length;
   const managerCount = users.filter((u) => u.role === "MANAGER").length;
 
@@ -153,6 +180,9 @@ export default function UserListPage() {
                     <th className="px-6 py-3 text-left text-xs font-semibold text-slate-300 uppercase tracking-wider">
                       Created
                     </th>
+                    <th className="px-6 py-3 text-right text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
@@ -184,6 +214,18 @@ export default function UserListPage() {
                             ? new Date(user.createdAt).toLocaleDateString()
                             : "N/A"}
                         </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right">
+                        {user.role === "MANAGER" ? (
+                          <button
+                            onClick={() => handleDeleteUser(user.id, user.role)}
+                            className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-semibold bg-red-500/10 text-red-300 border border-red-500/40 hover:bg-red-500/20 hover:text-red-100 transition-colors"
+                          >
+                            Delete
+                          </button>
+                        ) : (
+                          <span className="text-xs text-slate-500">Protected</span>
+                        )}
                       </td>
                     </tr>
                   ))}
