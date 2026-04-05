@@ -72,13 +72,67 @@ function findHeader(headers: string[], candidates: string[]): string | undefined
 }
 
 function parseDate(value: unknown): Date | undefined {
-  if (!value) return undefined;
-  if (value instanceof Date) return value;
-  const str = String(value).trim();
+  const v = normalizeUiValue(value);
+  if (!v) return undefined;
+  if (v instanceof Date) return v;
+  const str = String(v).trim();
   if (!str) return undefined;
   const d = new Date(str);
   if (!isNaN(d.getTime())) return d;
   return undefined;
+}
+
+function normalizeUiValue(value: unknown): string | number | Date {
+  if (value === null || value === undefined || value === "") return "";
+  if (value instanceof Date) return value;
+  if (typeof value === "string" || typeof value === "number") return value;
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if ("w" in obj && obj.w !== undefined && obj.w !== null) {
+      return String(obj.w);
+    }
+    if ("v" in obj && obj.v !== undefined && obj.v !== null) {
+      return normalizeUiValue(obj.v);
+    }
+    if (typeof obj.text === "string") return obj.text;
+    if ("result" in obj) return normalizeUiValue(obj.result);
+    if (Array.isArray(obj.richText)) {
+      return obj.richText
+        .map((part) =>
+          typeof part === "object" && part && "text" in part
+            ? String((part as { text?: unknown }).text ?? "")
+            : ""
+        )
+        .join("");
+    }
+    try {
+      return JSON.stringify(obj);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function formatCellForUi(value: unknown): string {
+  const v = normalizeUiValue(value);
+  if (v instanceof Date) return v.toISOString();
+  if (v === null || v === undefined) return "";
+  return String(v);
+}
+
+function sanitizeRowsForUi(rows: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return {};
+    const src = row as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(src)) {
+      out[k] = normalizeUiValue(v);
+    }
+    return out;
+  });
 }
 
 export default function TripAnalysisClient({ fileId }: { fileId: string | null }) {
@@ -115,7 +169,12 @@ export default function TripAnalysisClient({ fileId }: { fileId: string | null }
         }
         const data = await res.json();
         if (!data.file) throw new Error("File not found");
-        setFile(data.file as ExcelFile);
+        const incoming = data.file as ExcelFile;
+        setFile({
+          ...incoming,
+          headers: Array.isArray(incoming.headers) ? incoming.headers : [],
+          rows: sanitizeRowsForUi(incoming.rows),
+        });
         setError("");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load sheet");
@@ -849,7 +908,7 @@ export default function TripAnalysisClient({ fileId }: { fileId: string | null }
                         key={h}
                         className="px-3 py-1.5 text-slate-200 whitespace-nowrap"
                       >
-                        {String(row[h] ?? "")}
+                        {formatCellForUi(row[h])}
                       </td>
                     ))}
                   </tr>

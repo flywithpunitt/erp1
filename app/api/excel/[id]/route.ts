@@ -4,6 +4,59 @@ import connectDB from "@/lib/db";
 import ExcelFile from "@/lib/models/ExcelFile";
 import { getAuthUser, requireAdminOrManager, requireManager } from "@/lib/auth";
 
+function normalizeHeaderName(value: unknown): string {
+  const str = String(value ?? "");
+  const normalized = str
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  try {
+    return normalized.normalize("NFKC");
+  } catch {
+    return normalized;
+  }
+}
+
+function normalizeSerializedValue(value: unknown): string | number {
+  if (value === null || value === undefined || value === "") return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" || typeof value === "number") return value;
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.text === "string") return obj.text;
+    if ("result" in obj) return normalizeSerializedValue(obj.result);
+    if (Array.isArray(obj.richText)) {
+      return obj.richText
+        .map((part) =>
+          typeof part === "object" && part && "text" in part
+            ? String((part as { text?: unknown }).text ?? "")
+            : ""
+        )
+        .join("");
+    }
+    try {
+      return JSON.stringify(obj);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function sanitizeRows(rows: unknown): Record<string, string | number>[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return {};
+    const source = row as Record<string, unknown>;
+    const normalizedRow: Record<string, string | number> = {};
+    Object.entries(source).forEach(([key, val]) => {
+      normalizedRow[String(key)] = normalizeSerializedValue(val);
+    });
+    return normalizedRow;
+  });
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -39,7 +92,7 @@ export async function GET(
         id: file._id.toString(),
         name: file.name,
         headers: file.headers,
-        rows: file.rows,
+        rows: sanitizeRows(file.rows),
         celldata: Array.isArray(file.celldata) && file.celldata.length > 0 ? file.celldata : null,
         createdAt: file.createdAt,
         updatedAt: file.updatedAt,
@@ -90,14 +143,22 @@ export async function PUT(
       if (!Array.isArray(headers)) {
         return NextResponse.json({ message: "Headers must be an array" }, { status: 400 });
       }
-      setFields.headers = headers.filter((h: any) => typeof h === "string").map((h: string) => h.trim());
+      const seenHeaders = new Map<string, number>();
+      setFields.headers = headers
+        .map((h: any) => normalizeHeaderName(h))
+        .filter((h: string) => h)
+        .map((h: string) => {
+          const count = seenHeaders.get(h) ?? 0;
+          seenHeaders.set(h, count + 1);
+          return count === 0 ? h : `${h} (${count + 1})`;
+        });
     }
 
     if (rows !== undefined) {
       if (!Array.isArray(rows)) {
         return NextResponse.json({ message: "Rows must be an array" }, { status: 400 });
       }
-      setFields.rows = rows;
+      setFields.rows = sanitizeRows(rows);
     }
 
     if (Array.isArray(celldata) && celldata.length > 0) {
@@ -135,7 +196,7 @@ export async function PUT(
         id: updated._id.toString(),
         name: updated.name,
         headers: updated.headers,
-        rows: updated.rows,
+        rows: sanitizeRows(updated.rows),
         celldata: Array.isArray(updated.celldata) && updated.celldata.length > 0 ? updated.celldata : null,
         createdAt: updated.createdAt,
         updatedAt: updated.updatedAt,
