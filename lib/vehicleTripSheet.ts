@@ -55,6 +55,10 @@ export type VehicleTripSheetPayload = {
   tripSummary: {
     tripAmount: string;
     tteAmount: string;
+    /** Manual override; empty → use computed total from line items */
+    totalTripExpenditure: string;
+    /** Manual override; empty → trip amount − computed expenditure */
+    driverPayout: string;
   };
 };
 
@@ -93,7 +97,12 @@ export function emptyTripSheet(): VehicleTripSheetPayload {
       loadRatePerKm: "",
     },
     deductions: { anyDeduction: "" },
-    tripSummary: { tripAmount: "", tteAmount: "" },
+    tripSummary: {
+      tripAmount: "",
+      tteAmount: "",
+      totalTripExpenditure: "",
+      driverPayout: "",
+    },
   };
 }
 
@@ -158,6 +167,26 @@ export function computeTripSheetTotals(t: VehicleTripSheetPayload): TripSheetCom
     totalTripExpenditure,
     driverBalance,
   };
+}
+
+/** Saved manual value if set, otherwise computed from line items */
+export function resolvedTotalTripExpenditure(
+  t: VehicleTripSheetPayload,
+  computed: TripSheetComputed
+): number {
+  const raw = t.tripSummary.totalTripExpenditure;
+  if (raw != null && String(raw).trim() !== "") return parseAmount(raw);
+  return computed.totalTripExpenditure;
+}
+
+/** Saved manual value if set, otherwise trip amount − computed expenditure */
+export function resolvedDriverPayout(
+  t: VehicleTripSheetPayload,
+  computed: TripSheetComputed
+): number {
+  const raw = t.tripSummary.driverPayout;
+  if (raw != null && String(raw).trim() !== "") return parseAmount(raw);
+  return computed.driverBalance;
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
@@ -259,6 +288,8 @@ export function normalizeTripSheet(raw: unknown): VehicleTripSheetPayload {
   base.tripSummary = {
     tripAmount: asStr(ts.tripAmount),
     tteAmount: asStr(ts.tteAmount),
+    totalTripExpenditure: asStr(ts.totalTripExpenditure),
+    driverPayout: asStr(ts.driverPayout),
   };
 
   return base;

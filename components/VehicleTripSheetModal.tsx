@@ -9,6 +9,8 @@ import {
   emptyTripSheet,
   formatInr,
   normalizeTripSheet,
+  resolvedDriverPayout,
+  resolvedTotalTripExpenditure,
   type CashAdvanceRow,
   type DieselLogRow,
   type MiscExpenseRow,
@@ -270,8 +272,16 @@ export default function VehicleTripSheetModal({ open, onClose, fileId, vehicleNu
       { Section: "Settlement", Field: "Any Deduction", Value: tripSheet.deductions.anyDeduction },
       { Section: "Settlement", Field: "Trip Amount", Value: tripSheet.tripSummary.tripAmount },
       { Section: "Settlement", Field: "TTE", Value: tripSheet.tripSummary.tteAmount },
-      { Section: "Settlement", Field: "Total Expenditure", Value: totals.totalTripExpenditure },
-      { Section: "Settlement", Field: "Driver Payout", Value: totals.driverBalance },
+      {
+        Section: "Settlement",
+        Field: "Total Expenditure",
+        Value: resolvedTotalTripExpenditure(tripSheet, totals),
+      },
+      {
+        Section: "Settlement",
+        Field: "Driver Payout",
+        Value: resolvedDriverPayout(tripSheet, totals),
+      },
     ];
   }
 
@@ -555,8 +565,50 @@ export default function VehicleTripSheetModal({ open, onClose, fileId, vehicleNu
                     <div><label className={labelClass}>Load running total (auto)</label><div className={computedClass}>{formatInr(totals.loadCharges)}</div></div>
                     <label className={labelClass}>Any deduction ₹<input inputMode="decimal" className={inputClass} value={tripSheet.deductions.anyDeduction} onChange={(e) => setTripSheet((t) => ({ ...t, deductions: { anyDeduction: e.target.value } }))} /></label>
                     <label className={labelClass}>Trip amount ₹<input inputMode="decimal" className={inputClass} value={tripSheet.tripSummary.tripAmount} onChange={(e) => setTripSheet((t) => ({ ...t, tripSummary: { ...t.tripSummary, tripAmount: e.target.value } }))} /></label>
-                    <div><label className={labelClass}>Total trip expenditure (auto)</label><div className={computedClass}>{formatInr(totals.totalTripExpenditure)}</div></div>
-                    <div><label className={labelClass}>Driver payout (auto)</label><div className={computedClass}>{formatInr(totals.driverBalance)}</div></div>
+                    <label className={labelClass}>
+                      Total trip expenditure ₹
+                      <input
+                        inputMode="decimal"
+                        className={inputClass}
+                        placeholder={formatInr(totals.totalTripExpenditure)}
+                        value={tripSheet.tripSummary.totalTripExpenditure}
+                        onChange={(e) =>
+                          setTripSheet((t) => ({
+                            ...t,
+                            tripSummary: {
+                              ...t.tripSummary,
+                              totalTripExpenditure: e.target.value,
+                            },
+                          }))
+                        }
+                      />
+                      <span className="mt-0.5 block text-[10px] font-normal normal-case text-slate-400">
+                        Calculated: {formatInr(totals.totalTripExpenditure)}
+                        {tripSheet.tripSummary.totalTripExpenditure.trim() === "" ? " (used if left empty)" : ""}
+                      </span>
+                    </label>
+                    <label className={labelClass}>
+                      Driver payout ₹
+                      <input
+                        inputMode="decimal"
+                        className={inputClass}
+                        placeholder={formatInr(totals.driverBalance)}
+                        value={tripSheet.tripSummary.driverPayout}
+                        onChange={(e) =>
+                          setTripSheet((t) => ({
+                            ...t,
+                            tripSummary: {
+                              ...t.tripSummary,
+                              driverPayout: e.target.value,
+                            },
+                          }))
+                        }
+                      />
+                      <span className="mt-0.5 block text-[10px] font-normal normal-case text-slate-400">
+                        Calculated: {formatInr(totals.driverBalance)}
+                        {tripSheet.tripSummary.driverPayout.trim() === "" ? " (used if left empty)" : ""}
+                      </span>
+                    </label>
                     <label className={labelClass}>TTE ₹<input inputMode="decimal" className={inputClass} value={tripSheet.tripSummary.tteAmount} onChange={(e) => setTripSheet((t) => ({ ...t, tripSummary: { ...t.tripSummary, tteAmount: e.target.value } }))} /></label>
                   </div>
                 </SectionCard>

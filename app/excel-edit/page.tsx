@@ -3,6 +3,13 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { formatLocalDdMmYyyyHhMm, rewriteMachineDateStringToExcelDisplay } from "@/lib/excelDateDisplay";
+import {
+  LUCKYSHEET_TEXT_CT,
+  luckysheetValueToPlainString,
+  normalizeLuckysheetCelldataForDisplay,
+  sanitizeDisplayString,
+} from "@/lib/luckysheetCelldataSerials";
 import { API_BASE_URL } from "@/lib/config";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 
@@ -43,7 +50,7 @@ interface LuckysheetCellValue {
 
 interface LuckysheetSheet {
   name?: string;
-  index?: number;
+  index?: string | number;
   status?: number;
   order?: number;
   row?: number;
@@ -64,13 +71,15 @@ interface LuckysheetOptions {
   showsheetbar?: boolean;
 }
 
-// Always use a primitive for Luckysheet cell v (never an object, or it shows [object Object])
+// Always flatten to a display string — never pass raw objects (Luckysheet shows [object Object]).
 function toCellValue(val: unknown): string | number {
   if (val === undefined || val === null) return "";
-  if (typeof val === "string" || typeof val === "number") return val;
   if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
-  if (typeof val === "object") return JSON.stringify(val);
-  return String(val);
+  if (val instanceof Date) return formatLocalDdMmYyyyHhMm(val);
+  if (typeof val === "string") {
+    return rewriteMachineDateStringToExcelDisplay(sanitizeDisplayString(val));
+  }
+  return luckysheetValueToPlainString(val);
 }
 
 // Build Luckysheet celldata from headers + rows.
@@ -123,7 +132,14 @@ function buildSheetData(
             m: String(primitive),
             ...(rowBg   ? { bg: rowBg }  : {}),
             ...(rowBold ? { bl: 1 }       : {}),
+            ...(typeof primitive === "string" ? { ct: LUCKYSHEET_TEXT_CT } : {}),
           },
+        });
+      } else if (typeof primitive === "string") {
+        celldata.push({
+          r: r + dataStartRow,
+          c,
+          v: { v: primitive, m: primitive, ct: LUCKYSHEET_TEXT_CT },
         });
       } else {
         celldata.push({ r: r + dataStartRow, c, v: primitive });
@@ -143,17 +159,16 @@ function buildSheetData(
   };
 }
 
-// Luckysheet cells can be primitives or objects like { v, m, ct } - always get display value
+// Luckysheet cells can be primitives or objects like { v, m, ct } — unwrap to a real string (never [object Object]).
 function cellToValue(cell: unknown): string | number {
   if (cell == null) return "";
-  if (typeof cell === "object" && cell !== null && "v" in (cell as object)) {
-    const v = (cell as { v?: unknown; m?: unknown }).v;
-    if (v !== undefined && v !== null) return typeof v === "object" ? String(v) : (v as string | number);
-    const m = (cell as { m?: unknown }).m;
-    if (m !== undefined && m !== null) return typeof m === "object" ? String(m) : (m as string | number);
+  if (typeof cell === "string") {
+    return rewriteMachineDateStringToExcelDisplay(sanitizeDisplayString(cell));
   }
-  if (typeof cell === "object") return String(cell);
-  return cell as string | number;
+  if (typeof cell === "number") return cell;
+  const s = luckysheetValueToPlainString(cell);
+  if (s !== "") return rewriteMachineDateStringToExcelDisplay(s);
+  return "";
 }
 
 // Extract headers and rows from Luckysheet sheet data (cells may be objects).
@@ -338,20 +353,24 @@ function ExcelEditContent() {
     // Otherwise rebuild from headers+rows (first-time load from template).
     const sheet: LuckysheetSheet = data.celldata && data.celldata.length > 0
       ? (() => {
-          const maxRow = data.celldata!.reduce((m, c) => Math.max(m, (c.r ?? 0) + 1), 0);
-          const maxCol = data.celldata!.reduce((m, c) => Math.max(m, (c.c ?? 0) + 1), 0);
+          const fixedCelldata = normalizeLuckysheetCelldataForDisplay(data.celldata!);
+          const maxRow = fixedCelldata.reduce((m, c) => Math.max(m, (c.r ?? 0) + 1), 0);
+          const maxCol = fixedCelldata.reduce((m, c) => Math.max(m, (c.c ?? 0) + 1), 0);
           return {
             name: "Sheet1",
-            index: 0,
+            index: fileId ? `file-${fileId}` : "sheet-0",
             status: 1,
             order: 0,
             row: Math.max(maxRow + 20, 50),
             column: Math.max(maxCol + 5, 18),
-            celldata: data.celldata,
+            celldata: fixedCelldata,
             config: {},
           };
         })()
-      : buildSheetData(data.headers, data.rows);
+      : (() => {
+          const s = buildSheetData(data.headers, data.rows);
+          return { ...s, index: fileId ? `file-${fileId}` : "sheet-0" };
+        })();
 
     const opts = {
       container: LUCKYSHEET_CONTAINER_ID,
@@ -389,7 +408,7 @@ function ExcelEditContent() {
         console.error("Luckysheet create error:", err)
       }
     })
-  }, [scriptReady, file?.name]);
+  }, [scriptReady, file?.name, fileId]);
 
   useEffect(() => {
     tryInitLuckysheet();

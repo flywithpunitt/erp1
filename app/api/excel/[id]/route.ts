@@ -3,6 +3,11 @@ import mongoose from "mongoose";
 import connectDB from "@/lib/db";
 import ExcelFile from "@/lib/models/ExcelFile";
 import { getAuthUser, requireAdminOrManager, requireManager } from "@/lib/auth";
+import {
+  luckysheetValueToPlainString,
+  normalizeLuckysheetCelldataForDisplay,
+  sanitizeDisplayString,
+} from "@/lib/luckysheetCelldataSerials";
 
 function normalizeHeaderName(value: unknown): string {
   const str = String(value ?? "");
@@ -20,11 +25,14 @@ function normalizeHeaderName(value: unknown): string {
 function normalizeSerializedValue(value: unknown): string | number {
   if (value === null || value === undefined || value === "") return "";
   if (value instanceof Date) return value.toISOString();
-  if (typeof value === "string" || typeof value === "number") return value;
+  if (typeof value === "string") return sanitizeDisplayString(value);
+  if (typeof value === "number") return value;
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   if (typeof value === "object") {
+    const flat = luckysheetValueToPlainString(value);
+    if (flat !== "") return flat;
     const obj = value as Record<string, unknown>;
-    if (typeof obj.text === "string") return obj.text;
+    if (typeof obj.text === "string") return sanitizeDisplayString(obj.text);
     if ("result" in obj) return normalizeSerializedValue(obj.result);
     if (Array.isArray(obj.richText)) {
       return obj.richText
@@ -36,12 +44,13 @@ function normalizeSerializedValue(value: unknown): string | number {
         .join("");
     }
     try {
-      return JSON.stringify(obj);
+      const j = JSON.stringify(obj);
+      return j === "{}" ? "" : j;
     } catch {
-      return String(value);
+      return "";
     }
   }
-  return String(value);
+  return "";
 }
 
 function sanitizeRows(rows: unknown): Record<string, string | number>[] {
@@ -93,7 +102,10 @@ export async function GET(
         name: file.name,
         headers: file.headers,
         rows: sanitizeRows(file.rows),
-        celldata: Array.isArray(file.celldata) && file.celldata.length > 0 ? file.celldata : null,
+        celldata:
+          Array.isArray(file.celldata) && file.celldata.length > 0
+            ? normalizeLuckysheetCelldataForDisplay(file.celldata)
+            : null,
         createdAt: file.createdAt,
         updatedAt: file.updatedAt,
       },

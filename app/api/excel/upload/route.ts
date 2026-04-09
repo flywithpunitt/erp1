@@ -5,6 +5,33 @@ import mongoose from "mongoose";
 import connectDB from "@/lib/db";
 import ExcelFile from "@/lib/models/ExcelFile";
 import { getAuthUser, requireManager } from "@/lib/auth";
+import {
+  LUCKYSHEET_TEXT_CT,
+  luckysheetValueToPlainString,
+  sanitizeDisplayString,
+} from "@/lib/luckysheetCelldataSerials";
+
+function rcKey(r: number, c: number): string {
+  return `${r},${c}`;
+}
+
+/**
+ * ExcelJS `cell.text` is the rendered string per cell (e.g. `28-02-2026 13:00` — DD-MM-YYYY HH:mm, hyphens,
+ * leading zeros). Used as the primary display map; no app-side reformatting.
+ */
+function buildExcelJsDisplayMap(ejsWs: ExcelJS.Worksheet | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!ejsWs) return map;
+  ejsWs.eachRow({ includeEmpty: false }, (row, rowIdx) => {
+    const r = rowIdx - 1;
+    (row as any).eachCell({ includeEmpty: false }, (cell: ExcelJS.Cell, colIdx: number) => {
+      const c = colIdx - 1;
+      const t = typeof cell.text === "string" ? cell.text.trim() : "";
+      if (t !== "") map.set(rcKey(r, c), sanitizeDisplayString(t));
+    });
+  });
+  return map;
+}
 
 function normalizeHeaderName(value: unknown): string {
   const str = String(value ?? "");
@@ -19,70 +46,53 @@ function normalizeHeaderName(value: unknown): string {
   }
 }
 
-function isDateFormattedCell(cell: XLSX.CellObject | undefined): boolean {
-  if (!cell) return false;
-  if (cell.t === "d") return true;
-  if (typeof cell.z === "string") {
-    const format = cell.z.toLowerCase();
-    if (/[dmyhs]/.test(format)) return true;
-  }
-  return false;
-}
+/**
+ * Display priority: (1) ExcelJS `cell.text`, (2) SheetJS `w`, (3) `format_cell` SSF fallback.
+ * Each step returns the string Excel would show for that cell — no forced locale pattern.
+ */
+function getCellDisplayAsInExcel(
+  xlsxWs: XLSX.WorkSheet,
+  r: number,
+  c: number,
+  wb: XLSX.WorkBook,
+  excelJsDisplay?: string | null
+): string {
+  const addr = XLSX.utils.encode_cell({ r, c });
+  const cell = xlsxWs[addr] as XLSX.CellObject | undefined;
+  if (!cell || cell.t === "z") return "";
 
-function normalizeCellValue(
-  raw: unknown,
-  cell: XLSX.CellObject | undefined,
-  fmtDate: (d: Date) => string
-): string | number {
-  if (raw === null || raw === undefined || raw === "") return "";
-
-  if (raw instanceof Date) {
-    return fmtDate(raw);
-  }
-
-  if (typeof raw === "number") {
-    if (isDateFormattedCell(cell)) {
-      const date = XLSX.SSF.parse_date_code(raw);
-      if (date) {
-        return fmtDate(new Date(date.y, date.m - 1, date.d, date.H || 0, date.M || 0, date.S || 0));
-      }
-    }
-    return raw;
+  const ej = excelJsDisplay != null ? String(excelJsDisplay).trim() : "";
+  if (ej !== "") {
+    return sanitizeDisplayString(ej);
   }
 
-  if (typeof raw === "string") {
-    return raw;
+  const trimmedW = cell.w != null ? String(cell.w).trim() : "";
+  if (trimmedW !== "") {
+    return sanitizeDisplayString(trimmedW);
   }
 
-  if (typeof raw === "boolean") {
-    return raw ? "TRUE" : "FALSE";
+  const date1904 = !!wb.Workbook?.WBProps?.date1904;
+  const fmtOpts = { date1904 };
+  const cellForFmt = { ...cell } as XLSX.CellObject & { w?: string };
+  if (cellForFmt.w === undefined || String(cellForFmt.w).trim() === "") {
+    delete cellForFmt.w;
   }
 
-  if (typeof raw === "object") {
-    const obj = raw as Record<string, unknown>;
-    if ("w" in obj && obj.w !== undefined && obj.w !== null && obj.w !== "") {
-      return String(obj.w);
+  try {
+    const formatted = XLSX.utils.format_cell(cellForFmt, undefined, fmtOpts);
+    if (formatted != null && String(formatted).trim() !== "") {
+      return sanitizeDisplayString(String(formatted).trim());
     }
-    if ("v" in obj && obj.v !== undefined && obj.v !== null && obj.v !== "") {
-      return normalizeCellValue(obj.v, cell, fmtDate);
-    }
-    if (typeof obj.text === "string") return obj.text;
-    if (Array.isArray(obj.richText)) {
-      return obj.richText
-        .map((part) => (typeof part === "object" && part && "text" in part ? String((part as { text?: unknown }).text ?? "") : ""))
-        .join("");
-    }
-    if ("result" in obj) {
-      return normalizeCellValue(obj.result, cell, fmtDate);
-    }
-    try {
-      return JSON.stringify(obj);
-    } catch {
-      return String(raw);
-    }
+  } catch {
+    /* fall through */
   }
 
-  return String(raw);
+  const v = cell.v;
+  if (v === undefined || v === null || v === "") return "";
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  if (typeof v === "string") return sanitizeDisplayString(v);
+  if (typeof v === "object") return sanitizeDisplayString(luckysheetValueToPlainString(v));
+  return sanitizeDisplayString(String(v));
 }
 
 export async function POST(request: NextRequest) {
@@ -104,12 +114,8 @@ export async function POST(request: NextRequest) {
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(new Uint8Array(bytes));
 
-    const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-    const fmtDate = (d: Date) =>
-      `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-
-    // ── 1. Read values via SheetJS (fast, handles date serials) ───────────────
-    const xlsxWb = XLSX.read(buffer, { type: "buffer", cellDates: true });
+    // ── 1. Read values via SheetJS — cellStyles helps populate z (number format) for SSF.format
+    const xlsxWb = XLSX.read(buffer, { type: "buffer", cellDates: true, cellStyles: true });
     const sheetName = xlsxWb.SheetNames[0];
     const xlsxWs = xlsxWb.Sheets[sheetName];
 
@@ -117,6 +123,11 @@ export async function POST(request: NextRequest) {
     if (jsonData.length === 0) {
       return NextResponse.json({ message: "Excel file is empty" }, { status: 400 });
     }
+
+    const ejsWb = new ExcelJS.Workbook();
+    await ejsWb.xlsx.load(bytes);
+    const ejsWs = ejsWb.worksheets[0];
+    const excelJsDisplayByRc = buildExcelJsDisplayMap(ejsWs);
 
     const rawHeaders = (jsonData[0] as any[]).map((h) => normalizeHeaderName(h));
     const seenHeaders = new Map<string, number>();
@@ -138,42 +149,20 @@ export async function POST(request: NextRequest) {
       
         headerMeta.forEach(({ sourceIndex, normalized }) => {
           if (!normalized) return;
-      
-          const cellAddress = XLSX.utils.encode_cell({ r: rowIndex + 1, c: sourceIndex });
-          const sheetCell = xlsxWs[cellAddress] as XLSX.CellObject | undefined;
-      
-          // 🔥 ADD THIS BLOCK HERE
-          if (rowIndex < 40) {
-            console.log("---- CELL DEBUG ----");
-            console.log("Row:", rowIndex + 1, "Col:", normalized);
-            console.log("Raw row value:", row[sourceIndex], typeof row[sourceIndex]);
-            console.log("SheetCell:", sheetCell);
-            console.log("SheetCell.v:", sheetCell?.v);
-            console.log("SheetCell.w:", sheetCell?.w);
-            console.log("--------------------");
-          }
-      
-          const actualValue = sheetCell?.w ?? sheetCell?.v ?? row[sourceIndex];
-      
-          const finalValue = normalizeCellValue(actualValue, sheetCell, fmtDate);
-      
-          // 🔥 OPTIONAL EXTRA LOG
-          if (rowIndex < 40) {
-            console.log("FINAL VALUE:", finalValue, typeof finalValue);
-            console.log("====================");
-          }
-      
-          rowObj[normalized] = finalValue;
+
+          rowObj[normalized] = getCellDisplayAsInExcel(
+            xlsxWs,
+            rowIndex + 1,
+            sourceIndex,
+            xlsxWb,
+            excelJsDisplayByRc.get(rcKey(rowIndex + 1, sourceIndex))
+          );
         });
       
         return rowObj;
       });
 
-    // ── 2. Read styles via ExcelJS (full fill/font colour support) ────────────
-    const ejsWb = new ExcelJS.Workbook();
-    await ejsWb.xlsx.load(bytes);
-    const ejsWs = ejsWb.worksheets[0];
-
+    // ── 2. Styles from ExcelJS (workbook already loaded above) ────────────────
     // Helper: ExcelJS ARGB "FFD9D9D9" → Luckysheet "#d9d9d9"
     const argbToHex = (argb: string | undefined): string | null => {
       if (!argb || argb.length < 6) return null;
@@ -189,14 +178,33 @@ export async function POST(request: NextRequest) {
         const c = colIdx - 1;
         const lv: Record<string, any> = {};
 
-        // Value
-        const raw = cell.value;
-        if (raw instanceof Date) {
-          lv.v = fmtDate(raw); lv.m = lv.v;
-        } else if (raw !== null && raw !== undefined && raw !== "") {
-          lv.v = String(raw); lv.m = String(raw);
+        const sheetR = rowIdx - 1;
+        const sheetC = colIdx - 1;
+        let displayStr = getCellDisplayAsInExcel(
+          xlsxWs,
+          sheetR,
+          sheetC,
+          xlsxWb,
+          excelJsDisplayByRc.get(rcKey(sheetR, sheetC))
+        );
+
+        if (!displayStr) {
+          const raw = cell.value;
+          if (raw !== null && raw !== undefined && raw !== "") {
+            if (typeof raw === "object" && !(raw instanceof Date)) {
+              displayStr = sanitizeDisplayString(luckysheetValueToPlainString(raw));
+            } else if (typeof raw === "number") {
+              displayStr = sanitizeDisplayString(String(raw));
+            }
+          }
+        }
+        if (displayStr.length > 0) {
+          lv.v = displayStr;
+          lv.m = displayStr;
+          lv.ct = LUCKYSHEET_TEXT_CT;
         } else {
-          lv.v = null; lv.m = "";
+          lv.v = null;
+          lv.m = "";
         }
 
         // Background fill colour
